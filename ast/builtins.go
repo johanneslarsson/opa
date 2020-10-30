@@ -183,8 +183,11 @@ var DefaultBuiltins = [...]*Builtin{
 	// Crypto
 	CryptoX509ParseCertificates,
 	CryptoMd5,
+	CryptoMd5Base64UrlEncode,
 	CryptoSha1,
+	CryptoSha1Base64UrlEncode,
 	CryptoSha256,
+	CryptoSha256Base64UrlEncode,
 	CryptoX509ParseCertificateRequest,
 
 	// Graphs
@@ -1674,7 +1677,7 @@ var CryptoX509ParseCertificateRequest = &Builtin{
 	),
 }
 
-// CryptoMd5 returns a string representing the input string hashed with the md5 function
+// CryptoMd5 returns a string representing the input string hashed with the md5 function and hex encoded
 var CryptoMd5 = &Builtin{
 	Name: "crypto.md5",
 	Decl: types.NewFunction(
@@ -1683,9 +1686,29 @@ var CryptoMd5 = &Builtin{
 	),
 }
 
-// CryptoSha1 returns a string representing the input string hashed with the sha1 function
+// CryptoMd5Base64UrlEncode returns a string representing the input string hashed with the md5 function
+// and base64_url encoded
+var CryptoMd5Base64UrlEncode = &Builtin{
+	Name: "crypto.md5_base64url_encode",
+	Decl: types.NewFunction(
+		types.Args(types.S),
+		types.S,
+	),
+}
+
+// CryptoSha1 returns a string representing the input string hashed with the sha1 function and hex encoded
 var CryptoSha1 = &Builtin{
 	Name: "crypto.sha1",
+	Decl: types.NewFunction(
+		types.Args(types.S),
+		types.S,
+	),
+}
+
+// CryptoSha1Base64UrlEncode returns a string representing the input string hashed with the sha1 function
+// and base64_url encoded
+var CryptoSha1Base64UrlEncode = &Builtin{
+	Name: "crypto.sha1_base64url_encode",
 	Decl: types.NewFunction(
 		types.Args(types.S),
 		types.S,
@@ -1695,6 +1718,16 @@ var CryptoSha1 = &Builtin{
 // CryptoSha256 returns a string representing the input string hashed with the sha256 function
 var CryptoSha256 = &Builtin{
 	Name: "crypto.sha256",
+	Decl: types.NewFunction(
+		types.Args(types.S),
+		types.S,
+	),
+}
+
+// CryptoSha256Base64UrlEncode returns a string representing the input string hashed with the sha256 function
+// and base64_url encoded
+var CryptoSha256Base64UrlEncode = &Builtin{
+	Name: "crypto.sha256_base64url_encode",
 	Decl: types.NewFunction(
 		types.Args(types.S),
 		types.S,

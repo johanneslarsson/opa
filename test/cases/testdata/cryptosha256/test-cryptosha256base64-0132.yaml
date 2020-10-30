@@ -1,0 +1,15 @@
+cases:
+- data: { }
+  modules:
+  - |
+    package generated
+
+    p[__local0__] {
+      crypto.sha256_base64url_encode("lorem ipsum", __local1__)
+      __local0__ = __local1__
+    }
+  note: cryptosha256/crypto.sha256_base64url_encode with string
+  query: data.generated.p = x
+  want_result:
+  - x:
+      - Xiv1fT9AxLbfadrxk2y3ZvgyN0tPwCWafL_wbi9w8mk

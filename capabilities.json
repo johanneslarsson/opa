@@ -539,6 +539,20 @@
       }
     },
     {
+      "name": "crypto.md5_base64url_encode",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "type": "string"
+        },
+        "type": "function"
+      }
+    },
+    {
       "name": "crypto.sha1",
       "decl": {
         "args": [
@@ -553,7 +567,35 @@
       }
     },
     {
+      "name": "crypto.sha1_base64url_encode",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "type": "string"
+        },
+        "type": "function"
+      }
+    },
+    {
       "name": "crypto.sha256",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "type": "string"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "crypto.sha256_base64url_encode",
       "decl": {
         "args": [
           {

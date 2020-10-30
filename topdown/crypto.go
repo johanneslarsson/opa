@@ -141,19 +141,43 @@ func builtinCryptoMd5(a ast.Value) (ast.Value, error) {
 	return hashHelper(a, func(s ast.String) string { return fmt.Sprintf("%x", md5.Sum([]byte(s))) })
 }
 
+func builtinCryptoMd5Base64UrlEncode(a ast.Value) (ast.Value, error) {
+	return hashHelper(a, func(s ast.String) string {
+		md5Sum := md5.Sum([]byte(s))
+		return base64.RawURLEncoding.EncodeToString(md5Sum[:])
+	})
+}
+
 func builtinCryptoSha1(a ast.Value) (ast.Value, error) {
 	return hashHelper(a, func(s ast.String) string { return fmt.Sprintf("%x", sha1.Sum([]byte(s))) })
+}
+
+func builtinCryptoSha1Base64UrlEncode(a ast.Value) (ast.Value, error) {
+	return hashHelper(a, func(s ast.String) string {
+		sha1Sum := sha1.Sum([]byte(s))
+		return base64.RawURLEncoding.EncodeToString(sha1Sum[:])
+	})
 }
 
 func builtinCryptoSha256(a ast.Value) (ast.Value, error) {
 	return hashHelper(a, func(s ast.String) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(s))) })
 }
 
+func builtinCryptoSha256Base64UrlEncode(a ast.Value) (ast.Value, error) {
+	return hashHelper(a, func(s ast.String) string {
+		sha256Sum := sha256.Sum256([]byte(s))
+		return base64.RawURLEncoding.EncodeToString(sha256Sum[:])
+	})
+}
+
 func init() {
 	RegisterFunctionalBuiltin1(ast.CryptoX509ParseCertificates.Name, builtinCryptoX509ParseCertificates)
 	RegisterFunctionalBuiltin1(ast.CryptoMd5.Name, builtinCryptoMd5)
+	RegisterFunctionalBuiltin1(ast.CryptoMd5Base64UrlEncode.Name, builtinCryptoMd5Base64UrlEncode)
 	RegisterFunctionalBuiltin1(ast.CryptoSha1.Name, builtinCryptoSha1)
+	RegisterFunctionalBuiltin1(ast.CryptoSha1Base64UrlEncode.Name, builtinCryptoSha1Base64UrlEncode)
 	RegisterFunctionalBuiltin1(ast.CryptoSha256.Name, builtinCryptoSha256)
+	RegisterFunctionalBuiltin1(ast.CryptoSha256Base64UrlEncode.Name, builtinCryptoSha256Base64UrlEncode)
 	RegisterFunctionalBuiltin1(ast.CryptoX509ParseCertificateRequest.Name, builtinCryptoX509ParseCertificateRequest)
 }
 

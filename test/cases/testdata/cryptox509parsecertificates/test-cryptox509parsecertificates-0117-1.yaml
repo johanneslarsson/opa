@@ -1,0 +1,19 @@
+cases:
+- data:
+  modules:
+  - |
+    package generated
+
+    certs = "MIIDQTCCAimgAwIBAgIKBhxi7pQIeREQSDANBgkqhkiG9w0BAQsFADA1MQswCQYDVQQGEwJOTzERMA8GA1UEChMISm9oYW5uZXMxEzARBgNVBAMTCklzc3VpbmcgQ0EwHhcNMjEwMjEzMjIxNDU3WhcNMjIwMjEzMjIxNTA3WjBAMQswCQYDVQQGEwJOTzERMA8GA1UEChMISm9oYW5uZXMxHjAcBgNVBAMTFUJpZyBJbnQgU2VyaWFsIE51bWJlcjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAOd8wN14tSdV6uLdGkmhWFTdC4aSYGJ+SzC7jNt84neZem7GbW7tPIpNH7zkjBEDwXprLooPtkmHy8fW1D+qL1aYu3iy5WlGq5A8qkngsIcOMBbkY/XzFO0Z/+CJE+IQOiymY9m1EuXHsPLv+3IqOlu+Jxv8giv42Gbe8Z7orwank9QS9elWiin5ZBDwvOBhyWizw7OIyVF+Y7QE8rRlHkbwD2/Q0V+D6ePPmcbuPbtvGcfN4ZIEO1y58w3TPaxo5tYvjn8WMqbw4y6TSh1tjtqNtSlJLCFVXcacxuXAzJwkdm0zeKrwOIFI+KFmqLYJiCZY256C40YgGMcNafeiwx0CAwEAAaNIMEYwDgYDVR0PAQH/BAQDAgECMBMGA1UdJQQMMAoGCCsGAQUFBwMBMB8GA1UdIwQYMBaAFIQRCGnMVD+t+OD6MOIz6GktfgAcMA0GCSqGSIb3DQEBCwUAA4IBAQARY4vagu50rqltlZYUXZhs5uAoib2PLkUHsypOjIwQyP7HVv6cYH9tFwLNrbnrJkV93IBathC+vfpk5g+j8UCOBfwyXiGitzAVyn+KdYmQ3m9Wlga4yVm2WUd20TeuuhxuQFBrUvd/q28qhpEVgkXg40jZxBgvI7YtFCUNcEhMdgCR1xj1wjb65/RIlkjK0e9IYLSCSzQKokbqQs3lrZCLIHQlmGqudc9dnW2wwF7dGk88YcrFXpoek1NnO0X1bKdx8HyhILwHA1UTov6ayXjLeruLDiCTAgUePMfeMvyFjrLYgAb59zROs0WHgJi40tsF/uVJzgzuERtZ3Ca3EGkA"
+
+    p = __local2__ {
+      __local4__ = data.generated.certs
+      crypto.x509.parse_certificates(__local4__, __local3__)
+      __local0__ = __local3__
+      __local2__ = [__local1__ | __local1__ = __local0__[_].SerialNumber]
+    }
+  note: cryptox509parsecertificates/DER, single cert, b64
+  query: data.generated.p = x
+  want_result:
+  - x:
+    - 28857836529306024611912

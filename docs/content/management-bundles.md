@@ -86,8 +86,9 @@ OPA can optionally persist activated bundles to disk for recovery purposes. To e
 persistence, set the `bundles[_].persist` field to `true`. When bundle
 persistence is enabled, OPA will attempt to read the bundle from disk on startup. This
 allows OPA to start with the most recently activated bundle in case OPA cannot communicate
-with the bundle server. When communication between OPA and the bundle server is restored,
-the latest bundle is downloaded, activated, and persisted.
+with the bundle server. OPA will try to load and activate persisted bundles on a best-effort basis. Any errors
+encountered during the process will be surfaced in the bundle's status update. When communication between OPA and
+the bundle server is restored, the latest bundle is downloaded, activated, and persisted.
 
 > By default, bundles are persisted under the current working directory of the OPA process (e.g., `./.opa/bundles/<bundle-name>/bundle.tar.gz`).
 
@@ -111,7 +112,7 @@ files in the bundle must be organized hierarchically into directories inside
 the tarball.
 
 > The hierarchical organization indicates to OPA where to load the data files
-> into the [the `data` Document](../#the-data-document).
+> into the [the `data` Document](../philosophy/#the-opa-document-model).
 
 You can list the content of a bundle with `tar`.
 
@@ -495,7 +496,7 @@ Both methods are going to need a policy for either the service account or the IA
 
 ##### Testing Authentication
 
-Use the [AWS CLI tools]([command line tools](https://aws.amazon.com/cli/)) (see "Upload Bundle" below).
+Use the [AWS CLI tools](https://aws.amazon.com/cli/) (see ["Upload Bundle"](#upload-bundle) below).
 
 #### Upload Bundle
 
@@ -525,6 +526,8 @@ bundles:
     resource: bundle.tar.gz
 ```
 
+**NOTE:** the S3 `url` is the bucket's regional endpoint.
+
 ##### Metadata Credentials
 
 In order for this to work it is required that the permissions you created in the "Authentication" steps above are embedded in an IAM Role, which is then assigned to the EC2 instance hosting OPA.
@@ -544,6 +547,8 @@ bundles:
     service: s3
     resource: bundle.tar.gz
 ```
+
+**NOTE:** the S3 `url` is the bucket's regional endpoint.
 
 ### Google Cloud Storage
 

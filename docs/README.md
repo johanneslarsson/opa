@@ -47,7 +47,7 @@ re-deployed.
 ### Preview Markdown `content` (*.md)
 
 The majority of this can be done with any markdown renderer (typically built into or
-a via plug-in for IDE's and editors). The rendered output will be very similar to what Hugo will
+via a plug-in for IDEs and editors). The rendered output will be very similar to what Hugo will
 generate.
  
 > This excludes the Hugo shortcodes (places with `{{< SHORT_CODE >}}` in the markdown.
@@ -96,7 +96,7 @@ This option provides the best preview of the site content, using the exact same 
    user account (which should have been configured in the previous step).
    
 1) Netlify will then upload the built content and serve it via their CDN. A URL to the preview will be given in the
-   CLI console output.
+   CLI console output. Be sure to select the `edge` version within the Documentation pages to see your reflected changes in the remote site.
 
 
 #### Local Preview via `netlify dev`

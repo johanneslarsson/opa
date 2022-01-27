@@ -14,7 +14,7 @@ authorization so that:
 - Traffic between OPA and clients is encrypted.
 - Clients verify the OPA API endpoint identity.
 - OPA verifies client identities.
-- Clients are only granted access to specific APIs or sections of [The `data` Document](../#the-data-document).
+- Clients are only granted access to specific APIs or sections of [The `data` Document](../philosophy/#the-opa-document-model).
 
 ## TLS and HTTPS
 
@@ -26,6 +26,12 @@ startup:
 
 OPA will exit immediately with a non-zero status code if only one of these flags
 is specified.
+
+The server can track the certificate and key files' contents, and reload them if necessary:
+
+- ``--tls-cert-refresh-period=<duration>`` specifies how often OPA should check the TLS certificate and
+  private key file for changes (defaults to 0s, disabling periodic refresh). This argument accepts
+  any duration, such as "30s", "5m" or "24h".
 
 Note that for using TLS-based authentication, a CA cert file can be provided:
 
@@ -78,8 +84,9 @@ curl http://localhost:8181/v1/data
 curl -k https://localhost:8181/v1/data
 ```
 
-> We have to use cURL's `-k/--insecure` flag because we are using a
-> self-signed certificate.
+{{< info >}}
+We have to use cURL's `-k/--insecure` flag because we are using a self-signed certificate.
+{{< /info >}}
 
 ## Authentication and Authorization
 

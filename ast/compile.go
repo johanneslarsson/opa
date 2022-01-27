@@ -109,6 +109,7 @@ type Compiler struct {
 	debug                 debug.Debug                   // emits debug information produced during compilation
 	schemaSet             *SchemaSet                    // user-supplied schemas for input and data documents
 	inputType             types.Type                    // global input type retrieved from schema set
+	strict                bool                          // enforce strict compilation checks
 }
 
 // CompilerStage defines the interface for stages in the compiler.
@@ -254,6 +255,7 @@ func NewCompiler() *Compiler {
 		metricName string
 		f          func()
 	}{
+		{"CheckDuplicateImports", "compile_stage_check_duplicate_imports", c.checkDuplicateImports},
 		// Reference resolution should run first as it may be used to lazily
 		// load additional modules. If any stages run before resolution, they
 		// need to be re-run after resolution.
@@ -336,6 +338,11 @@ func (c *Compiler) WithCapabilities(capabilities *Capabilities) *Compiler {
 	return c
 }
 
+// Capabilities returns the capabilities enabled during compilation.
+func (c *Compiler) Capabilities() *Capabilities {
+	return c.capabilities
+}
+
 // WithDebug sets where debug messages are written to. Passing `nil` has no
 // effect.
 func (c *Compiler) WithDebug(sink io.Writer) *Compiler {
@@ -359,6 +366,12 @@ func (c *Compiler) WithUnsafeBuiltins(unsafeBuiltins map[string]struct{}) *Compi
 	for name := range unsafeBuiltins {
 		c.unsafeBuiltinsMap[name] = struct{}{}
 	}
+	return c
+}
+
+// WithStrict enables strict mode in the compiler.
+func (c *Compiler) WithStrict(strict bool) *Compiler {
+	c.strict = strict
 	return c
 }
 
@@ -1270,6 +1283,26 @@ func (c *Compiler) getExports() *util.HashMap {
 	}
 
 	return rules
+}
+
+func (c *Compiler) checkDuplicateImports() {
+	if !c.strict {
+		return
+	}
+
+	for _, name := range c.sorted {
+		mod := c.Modules[name]
+		processedImports := map[Var]*Import{}
+
+		for _, imp := range mod.Imports {
+			name := imp.Name()
+			if processed, conflict := processedImports[name]; conflict {
+				c.err(NewError(CompileErr, imp.Location, "import must not shadow %v", processed))
+			} else {
+				processedImports[name] = imp
+			}
+		}
+	}
 }
 
 // resolveAllRefs resolves references in expressions to their fully qualified values.
@@ -2970,15 +3003,11 @@ func outputVarsForExpr(expr *Expr, arity func(Ref) int, safe VarSet) VarSet {
 
 	// With modifier inputs must be safe.
 	for _, with := range expr.With {
-		unsafe := false
-		WalkVars(with, func(v Var) bool {
-			if !safe.Contains(v) {
-				unsafe = true
-				return true
-			}
-			return false
-		})
-		if unsafe {
+		vis := NewVarVisitor().WithParams(SafetyCheckVisitorParams)
+		vis.Walk(with)
+		vars := vis.Vars()
+		unsafe := vars.Diff(safe)
+		if len(unsafe) > 0 {
 			return VarSet{}
 		}
 	}

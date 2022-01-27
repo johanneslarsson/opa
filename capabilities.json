@@ -124,6 +124,26 @@
       }
     },
     {
+      "name": "array.reverse",
+      "decl": {
+        "args": [
+          {
+            "dynamic": {
+              "type": "any"
+            },
+            "type": "array"
+          }
+        ],
+        "result": {
+          "dynamic": {
+            "type": "any"
+          },
+          "type": "array"
+        },
+        "type": "function"
+      }
+    },
+    {
       "name": "array.slice",
       "decl": {
         "args": [
@@ -553,6 +573,74 @@
       }
     },
     {
+      "name": "crypto.hmac.md5",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "type": "string"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "crypto.hmac.sha1",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "type": "string"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "crypto.hmac.sha256",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "type": "string"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "crypto.hmac.sha512",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "type": "string"
+        },
+        "type": "function"
+      }
+    },
+    {
       "name": "crypto.md5",
       "decl": {
         "args": [
@@ -892,6 +980,65 @@
       }
     },
     {
+      "name": "graph.reachable_paths",
+      "decl": {
+        "args": [
+          {
+            "dynamic": {
+              "key": {
+                "type": "any"
+              },
+              "value": {
+                "of": [
+                  {
+                    "dynamic": {
+                      "type": "any"
+                    },
+                    "type": "array"
+                  },
+                  {
+                    "of": {
+                      "type": "any"
+                    },
+                    "type": "set"
+                  }
+                ],
+                "type": "any"
+              }
+            },
+            "type": "object"
+          },
+          {
+            "of": [
+              {
+                "dynamic": {
+                  "type": "any"
+                },
+                "type": "array"
+              },
+              {
+                "of": {
+                  "type": "any"
+                },
+                "type": "set"
+              }
+            ],
+            "type": "any"
+          }
+        ],
+        "result": {
+          "of": {
+            "dynamic": {
+              "type": "any"
+            },
+            "type": "array"
+          },
+          "type": "set"
+        },
+        "type": "function"
+      }
+    },
+    {
       "name": "gt",
       "decl": {
         "args": [
@@ -998,6 +1145,26 @@
         ],
         "result": {
           "type": "number"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "indexof_n",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "dynamic": {
+            "type": "number"
+          },
+          "type": "array"
         },
         "type": "function"
       }
@@ -2392,6 +2559,31 @@
       }
     },
     {
+      "name": "object.union_n",
+      "decl": {
+        "args": [
+          {
+            "dynamic": {
+              "dynamic": {
+                "key": {
+                  "type": "any"
+                },
+                "value": {
+                  "type": "any"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        ],
+        "result": {
+          "type": "any"
+        },
+        "type": "function"
+      }
+    },
+    {
       "name": "opa.runtime",
       "decl": {
         "result": {
@@ -2901,6 +3093,20 @@
             },
             "type": "object"
           },
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "type": "string"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "strings.reverse",
+      "decl": {
+        "args": [
           {
             "type": "string"
           }

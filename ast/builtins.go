@@ -80,6 +80,7 @@ var DefaultBuiltins = [...]*Builtin{
 	// Arrays
 	ArrayConcat,
 	ArraySlice,
+	ArrayReverse,
 
 	// Conversions
 	ToNumber,
@@ -111,6 +112,7 @@ var DefaultBuiltins = [...]*Builtin{
 	Concat,
 	FormatInt,
 	IndexOf,
+	IndexOfN,
 	Substring,
 	Lower,
 	Upper,
@@ -127,6 +129,7 @@ var DefaultBuiltins = [...]*Builtin{
 	TrimSuffix,
 	TrimSpace,
 	Sprintf,
+	StringReverse,
 
 	// Numbers
 	NumbersRange,
@@ -154,6 +157,7 @@ var DefaultBuiltins = [...]*Builtin{
 
 	// Object Manipulation
 	ObjectUnion,
+	ObjectUnionN,
 	ObjectRemove,
 	ObjectFilter,
 	ObjectGet,
@@ -200,10 +204,15 @@ var DefaultBuiltins = [...]*Builtin{
 	CryptoSha256,
 	CryptoX509ParseCertificateRequest,
 	CryptoX509ParseRSAPrivateKey,
+	CryptoHmacMd5,
+	CryptoHmacSha1,
+	CryptoHmacSha256,
+	CryptoHmacSha512,
 
 	// Graphs
 	WalkBuiltin,
 	ReachableBuiltin,
+	ReachablePathsBuiltin,
 
 	// Sort
 	Sort,
@@ -713,6 +722,17 @@ var ArraySlice = &Builtin{
 	),
 }
 
+// ArrayReverse returns a given array, reversed
+var ArrayReverse = &Builtin{
+	Name: "array.reverse",
+	Decl: types.NewFunction(
+		types.Args(
+			types.NewArray(nil, types.A),
+		),
+		types.NewArray(nil, types.A),
+	),
+}
+
 /**
  * Conversions
  */
@@ -875,6 +895,18 @@ var IndexOf = &Builtin{
 			types.S,
 		),
 		types.N,
+	),
+}
+
+// IndexOfN returns a list of all the indexes of a substring contained inside a string
+var IndexOfN = &Builtin{
+	Name: "indexof_n",
+	Decl: types.NewFunction(
+		types.Args(
+			types.S,
+			types.S,
+		),
+		types.NewArray(nil, types.N),
 	),
 }
 
@@ -1071,6 +1103,17 @@ var Sprintf = &Builtin{
 		types.Args(
 			types.S,
 			types.NewArray(nil, types.A),
+		),
+		types.S,
+	),
+}
+
+// StringReverse returns the given string, reversed.
+var StringReverse = &Builtin{
+	Name: "strings.reverse",
+	Decl: types.NewFunction(
+		types.Args(
+			types.S,
 		),
 		types.S,
 	),
@@ -1282,6 +1325,20 @@ var ObjectUnion = &Builtin{
 			types.NewObject(
 				nil,
 				types.NewDynamicProperty(types.A, types.A),
+			),
+		),
+		types.A,
+	),
+}
+
+// ObjectUnionN creates a new object that is the asymmetric union of all objects merged from left to right
+var ObjectUnionN = &Builtin{
+	Name: "object.union_n",
+	Decl: types.NewFunction(
+		types.Args(
+			types.NewArray(
+				nil,
+				types.NewObject(nil, types.NewDynamicProperty(types.A, types.A)),
 			),
 		),
 		types.A,
@@ -1873,6 +1930,58 @@ var CryptoSha256 = &Builtin{
 	),
 }
 
+// CryptoHmacMd5 returns a string representing the MD-5 HMAC of the input message using the input key
+// Inputs are message, key
+var CryptoHmacMd5 = &Builtin{
+	Name: "crypto.hmac.md5",
+	Decl: types.NewFunction(
+		types.Args(
+			types.S,
+			types.S,
+		),
+		types.S,
+	),
+}
+
+// CryptoHmacSha1 returns a string representing the SHA-1 HMAC of the input message using the input key
+// Inputs are message, key
+var CryptoHmacSha1 = &Builtin{
+	Name: "crypto.hmac.sha1",
+	Decl: types.NewFunction(
+		types.Args(
+			types.S,
+			types.S,
+		),
+		types.S,
+	),
+}
+
+// CryptoHmacSha256 returns a string representing the SHA-256 HMAC of the input message using the input key
+// Inputs are message, key
+var CryptoHmacSha256 = &Builtin{
+	Name: "crypto.hmac.sha256",
+	Decl: types.NewFunction(
+		types.Args(
+			types.S,
+			types.S,
+		),
+		types.S,
+	),
+}
+
+// CryptoHmacSha512 returns a string representing the SHA-512 HMAC of the input message using the input key
+// Inputs are message, key
+var CryptoHmacSha512 = &Builtin{
+	Name: "crypto.hmac.sha512",
+	Decl: types.NewFunction(
+		types.Args(
+			types.S,
+			types.S,
+		),
+		types.S,
+	),
+}
+
 /**
  * Graphs.
  */
@@ -1911,6 +2020,26 @@ var ReachableBuiltin = &Builtin{
 			types.NewAny(types.NewSet(types.A), types.NewArray(nil, types.A)),
 		),
 		types.NewSet(types.A),
+	),
+}
+
+// ReachablePathsBuiltin computes the set of reachable paths in the graph from a set
+// of starting nodes.
+var ReachablePathsBuiltin = &Builtin{
+	Name: "graph.reachable_paths",
+	Decl: types.NewFunction(
+		types.Args(
+			types.NewObject(
+				nil,
+				types.NewDynamicProperty(
+					types.A,
+					types.NewAny(
+						types.NewSet(types.A),
+						types.NewArray(nil, types.A)),
+				)),
+			types.NewAny(types.NewSet(types.A), types.NewArray(nil, types.A)),
+		),
+		types.NewSet(types.NewArray(nil, types.A)),
 	),
 }
 

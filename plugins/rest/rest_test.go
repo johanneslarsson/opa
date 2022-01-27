@@ -41,8 +41,31 @@ import (
 
 const keyID = "key1"
 
-func TestNew(t *testing.T) {
+func TestAuthPluginWithNoAuthPluginLookup(t *testing.T) {
+	authPlugin := "anything"
+	cfg := Config{
+		Credentials: struct {
+			Bearer               *bearerAuthPlugin                  `json:"bearer,omitempty"`
+			OAuth2               *oauth2ClientCredentialsAuthPlugin `json:"oauth2,omitempty"`
+			ClientTLS            *clientTLSAuthPlugin               `json:"client_tls,omitempty"`
+			S3Signing            *awsSigningAuthPlugin              `json:"s3_signing,omitempty"`
+			GCPMetadata          *gcpMetadataAuthPlugin             `json:"gcp_metadata,omitempty"`
+			AzureManagedIdentity *azureManagedIdentitiesAuthPlugin  `json:"azure_managed_identity,omitempty"`
+			Plugin               *string                            `json:"plugin,omitempty"`
+		}{
+			Plugin: &authPlugin,
+		},
+	}
+	_, err := cfg.authPlugin(nil)
+	if err == nil {
+		t.Error("Expected error but got nil")
+	}
+	if want, have := "missing auth plugin lookup function", err.Error(); want != have {
+		t.Errorf("Unexpected error, want %q, have %q", want, have)
+	}
+}
 
+func TestNew(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   string
@@ -193,7 +216,7 @@ func TestNew(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "TooManyS3CredOptions",
+			name: "TooManyS3CredOptions/metadata+environment",
 			input: `{
 				"name": "foo",
 				"url": "http://localhost",
@@ -204,6 +227,22 @@ func TestNew(t *testing.T) {
 							"iam_role": "my_iam_role"
 						},
 						"environment_credentials": {}
+					}
+				}
+			}`,
+			wantErr: true,
+		},
+		{
+			name: "TooManyS3CredOptions/metadata+profile+environment+webidentity",
+			input: `{
+				"name": "foo",
+				"url": "http://localhost",
+				"credentials": {
+					"s3_signing": {
+						"profile_credentials": {},
+						"environment_credentials": {},
+						"web_identity_credentials": {},
+						"metadata_credentials": {}
 					}
 				}
 			}`,
@@ -502,6 +541,7 @@ func TestNew(t *testing.T) {
 					},
 				}
 			}`,
+			wantErr: true,
 		},
 		{
 			name: "S3WebIdentityCreds",
@@ -517,6 +557,7 @@ func TestNew(t *testing.T) {
 			env: map[string]string{
 				awsRoleArnEnvVar:              "TEST",
 				awsWebIdentityTokenFileEnvVar: "TEST",
+				awsRegionEnvVar:               "us-west-1",
 			},
 		},
 		{
@@ -605,6 +646,17 @@ func TestNew(t *testing.T) {
         }
 			}`,
 		},
+		{
+			name: "Unknown plugin",
+			input: `{
+				"name": "foo",
+				"url": "http://localhost",
+				"credentials": {
+					"plugin": "unknown_plugin"
+        }
+			}`,
+			wantErr: true,
+		},
 	}
 
 	var results []Client
@@ -639,11 +691,11 @@ func TestNew(t *testing.T) {
 				_ = os.Setenv(key, val)
 			}
 
-			defer func() {
+			t.Cleanup(func() {
 				for key := range tc.env {
 					_ = os.Unsetenv(key)
 				}
-			}()
+			})
 
 			client, err := New([]byte(tc.input), ks, AuthPluginLookup(mockAuthPluginLookup))
 			if err != nil {

@@ -27,6 +27,7 @@ import (
 	"github.com/open-policy-agent/opa/server"
 	"github.com/open-policy-agent/opa/storage"
 	"github.com/open-policy-agent/opa/storage/inmem"
+	"github.com/open-policy-agent/opa/topdown/builtins"
 	"github.com/open-policy-agent/opa/topdown/cache"
 	"github.com/open-policy-agent/opa/topdown/print"
 )
@@ -53,9 +54,14 @@ type state struct {
 // options that specify an OPA configuration file.
 func New(ctx context.Context, opts Options) (*OPA, error) {
 
-	id, err := uuid.New(rand.Reader)
-	if err != nil {
-		return nil, err
+	var err error
+
+	id := opts.ID
+	if id == "" {
+		id, err = uuid.New(rand.Reader)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if err := opts.init(); err != nil {
@@ -128,7 +134,7 @@ func (opa *OPA) configure(ctx context.Context, bs []byte, ready chan struct{}, b
 		return err
 	}
 
-	manager.RegisterCompilerTrigger(func(_ storage.Transaction) {
+	manager.RegisterCompilerTrigger(func(storage.Transaction) {
 		opa.mtx.Lock()
 		opa.state.queryCache.Clear()
 		opa.mtx.Unlock()
@@ -215,62 +221,46 @@ func (opa *OPA) Stop(ctx context.Context) {
 // Decision returns a named decision. This function is threadsafe.
 func (opa *OPA) Decision(ctx context.Context, options DecisionOptions) (*DecisionResult, error) {
 
-	m := metrics.New()
-	m.Timer(metrics.SDKDecisionEval).Start()
+	record := server.Info{
+		Timestamp:      options.Now,
+		Path:           options.Path,
+		Input:          &options.Input,
+		NDBuiltinCache: &options.NDBCache,
+	}
 
-	result, err := newDecisionResult()
+	// Only use non-deterministic builtins cache if it's available.
+	var ndbc builtins.NDBCache
+	if options.NDBCache != nil {
+		if v, ok := options.NDBCache.(builtins.NDBCache); ok {
+			ndbc = v
+		}
+	}
+
+	result, err := opa.executeTransaction(
+		ctx,
+		&record,
+		func(s state, result *DecisionResult) {
+			result.Result, record.InputAST, record.Bundles, record.Error = evaluate(ctx, evalArgs{
+				runtime:         s.manager.Info,
+				printHook:       s.manager.PrintHook(),
+				compiler:        s.manager.GetCompiler(),
+				store:           s.manager.Store,
+				queryCache:      s.queryCache,
+				interQueryCache: s.interQueryBuiltinCache,
+				ndbcache:        ndbc,
+				txn:             record.Txn,
+				now:             record.Timestamp,
+				path:            record.Path,
+				input:           *record.Input,
+				m:               record.Metrics,
+			})
+			if record.Error == nil {
+				record.Results = &result.Result
+			}
+		},
+	)
 	if err != nil {
 		return nil, err
-	}
-
-	opa.mtx.Lock()
-	s := *opa.state
-	opa.mtx.Unlock()
-
-	record := server.Info{
-		DecisionID: result.ID,
-		Timestamp:  options.Now,
-		Path:       options.Path,
-		Input:      &options.Input,
-		Metrics:    m,
-	}
-
-	if record.Timestamp.IsZero() {
-		record.Timestamp = time.Now().UTC()
-	}
-
-	if record.Path == "" {
-		record.Path = *s.manager.Config.DefaultDecision
-	}
-
-	record.Txn, record.Error = s.manager.Store.NewTransaction(ctx, storage.TransactionParams{})
-
-	if record.Error == nil {
-		defer s.manager.Store.Abort(ctx, record.Txn)
-		result.Result, record.InputAST, record.Bundles, record.Error = evaluate(ctx, evalArgs{
-			runtime:         s.manager.Info,
-			printHook:       s.manager.PrintHook(),
-			compiler:        s.manager.GetCompiler(),
-			store:           s.manager.Store,
-			txn:             record.Txn,
-			queryCache:      s.queryCache,
-			interQueryCache: s.interQueryBuiltinCache,
-			now:             record.Timestamp,
-			path:            record.Path,
-			input:           *record.Input,
-			m:               record.Metrics,
-		})
-		if record.Error == nil {
-			record.Results = &result.Result
-		}
-	}
-
-	m.Timer(metrics.SDKDecisionEval).Stop()
-
-	if logger := logs.Lookup(s.manager); logger != nil {
-		if err := logger.Log(ctx, &record); err != nil {
-			return result, fmt.Errorf("decision log: %w", err)
-		}
 	}
 
 	return result, record.Error
@@ -278,9 +268,10 @@ func (opa *OPA) Decision(ctx context.Context, options DecisionOptions) (*Decisio
 
 // DecisionOptions contains parameters for query evaluation.
 type DecisionOptions struct {
-	Now   time.Time   // specifies wallclock time used for time.now_ns(), decision log timestamp, etc.
-	Path  string      // specifies name of policy decision to evaluate (e.g., example/allow)
-	Input interface{} // specifies value of the input document to evaluate policy with
+	Now      time.Time   // specifies wallclock time used for time.now_ns(), decision log timestamp, etc.
+	Path     string      // specifies name of policy decision to evaluate (e.g., example/allow)
+	Input    interface{} // specifies value of the input document to evaluate policy with
+	NDBCache interface{} // specifies the non-deterministic builtins cache to use for evaluation.
 }
 
 // DecisionResult contains the output of query evaluation.
@@ -296,6 +287,125 @@ func newDecisionResult() (*DecisionResult, error) {
 	}
 	result := &DecisionResult{ID: id}
 	return result, nil
+}
+
+func (opa *OPA) executeTransaction(ctx context.Context, record *server.Info, work func(state, *DecisionResult)) (*DecisionResult, error) {
+	m := metrics.New()
+	m.Timer(metrics.SDKDecisionEval).Start()
+
+	result, err := newDecisionResult()
+	if err != nil {
+		return nil, err
+	}
+
+	opa.mtx.Lock()
+	s := *opa.state
+	opa.mtx.Unlock()
+
+	record.DecisionID = result.ID
+	record.Metrics = m
+
+	if record.Timestamp.IsZero() {
+		record.Timestamp = time.Now().UTC()
+	}
+
+	if record.Path == "" {
+		record.Path = *s.manager.Config.DefaultDecision
+	}
+
+	record.Txn, record.Error = s.manager.Store.NewTransaction(ctx, storage.TransactionParams{})
+
+	if record.Error == nil {
+		defer s.manager.Store.Abort(ctx, record.Txn)
+		work(s, result)
+	}
+
+	m.Timer(metrics.SDKDecisionEval).Stop()
+
+	if logger := logs.Lookup(s.manager); logger != nil {
+		if err := logger.Log(ctx, record); err != nil {
+			return result, fmt.Errorf("decision log: %w", err)
+		}
+	}
+	return result, nil
+}
+
+// Partial returns a named decision. This function is threadsafe.
+// Note(philipc): The NDBCache is unused here, because non-deterministic
+// builtins are not run during partial evaluation.
+func (opa *OPA) Partial(ctx context.Context, options PartialOptions) (*PartialResult, error) {
+
+	if options.Mapper == nil {
+		options.Mapper = &RawMapper{}
+	}
+
+	record := server.Info{
+		Timestamp: options.Now,
+		Input:     &options.Input,
+		Query:     options.Query,
+	}
+
+	var pq *rego.PartialQueries
+	decision, err := opa.executeTransaction(
+		ctx,
+		&record,
+		func(s state, result *DecisionResult) {
+			pq, record.InputAST, record.Bundles, record.Error = partial(ctx, partialEvalArgs{
+				runtime:   s.manager.Info,
+				printHook: s.manager.PrintHook(),
+				compiler:  s.manager.GetCompiler(),
+				store:     s.manager.Store,
+				txn:       record.Txn,
+				now:       record.Timestamp,
+				query:     record.Query,
+				unknowns:  options.Unknowns,
+				input:     *record.Input,
+				m:         record.Metrics,
+			})
+			if record.Error == nil {
+				result.Result, record.Error = options.Mapper.MapResults(pq)
+				var pqAst interface{}
+				if record.Error == nil {
+					var mappedResults interface{}
+					mappedResults, record.Error = options.Mapper.ResultToJSON(result.Result)
+					record.MappedResults = &mappedResults
+					pqAst = pq
+					record.Results = &pqAst
+				}
+			}
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return &PartialResult{
+		ID:     decision.ID,
+		Result: decision.Result,
+		AST:    pq,
+	}, record.Error
+}
+
+type PartialQueryMapper interface {
+	// The first interface being returned is the type that will be used for further processing
+	MapResults(pq *rego.PartialQueries) (interface{}, error)
+	// This should be able to take the Result object from MapResults and return a type that can be logged as JSON
+	ResultToJSON(result interface{}) (interface{}, error)
+}
+
+// PartialOptions contains parameters for partial query evaluation.
+type PartialOptions struct {
+	Now      time.Time          // specifies wallclock time used for time.now_ns(), decision log timestamp, etc.
+	Input    interface{}        // specifies value of the input document to evaluate policy with
+	Query    string             // specifies the query to be partially evaluated
+	Unknowns []string           // specifies the unknown elements of the policy
+	Mapper   PartialQueryMapper // specifies the mapper to use when processing results
+}
+
+type PartialResult struct {
+	ID     string               // decision ID
+	Result interface{}          // mapped result
+	AST    *rego.PartialQueries // raw result
 }
 
 // Error represents an internal error in the SDK.
@@ -337,6 +447,7 @@ type evalArgs struct {
 	now             time.Time
 	path            string
 	input           interface{}
+	ndbcache        builtins.NDBCache
 	m               metrics.Metrics
 }
 
@@ -383,6 +494,7 @@ func evaluate(ctx context.Context, args evalArgs) (interface{}, ast.Value, map[s
 		rego.EvalTransaction(args.txn),
 		rego.EvalMetrics(args.m),
 		rego.EvalInterQueryBuiltinCache(args.interQueryCache),
+		rego.EvalNDBuiltinCache(args.ndbcache),
 	)
 	if err != nil {
 		return nil, inputAST, bundles, err
@@ -391,6 +503,50 @@ func evaluate(ctx context.Context, args evalArgs) (interface{}, ast.Value, map[s
 	}
 
 	return rs[0].Expressions[0].Value, inputAST, bundles, nil
+}
+
+type partialEvalArgs struct {
+	runtime   *ast.Term
+	compiler  *ast.Compiler
+	printHook print.Hook
+	store     storage.Store
+	txn       storage.Transaction
+	unknowns  []string
+	query     string
+	now       time.Time
+	input     interface{}
+	m         metrics.Metrics
+}
+
+func partial(ctx context.Context, args partialEvalArgs) (*rego.PartialQueries, ast.Value, map[string]server.BundleInfo, error) {
+
+	bundles, err := bundles(ctx, args.store, args.txn)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	inputAST, err := ast.InterfaceToValue(args.input)
+	if err != nil {
+		return nil, nil, bundles, err
+	}
+	re := rego.New(
+		rego.Time(args.now),
+		rego.Metrics(args.m),
+		rego.Store(args.store),
+		rego.Compiler(args.compiler),
+		rego.Transaction(args.txn),
+		rego.Runtime(args.runtime),
+		rego.Input(args.input),
+		rego.Query(args.query),
+		rego.Unknowns(args.unknowns),
+		rego.PrintHook(args.printHook),
+	)
+
+	pq, err := re.Partial(ctx)
+	if err != nil {
+		return nil, nil, bundles, err
+	}
+	return pq, inputAST, bundles, err
 }
 
 type queryCache struct {

@@ -67,6 +67,8 @@ const (
 	Semicolon
 
 	Every
+	Contains
+	If
 )
 
 var strings = [...]string{
@@ -115,6 +117,8 @@ var strings = [...]string{
 	Dot:        ".",
 	Semicolon:  ";",
 	Every:      "every",
+	Contains:   "contains",
+	If:         "if",
 }
 
 var keywords = map[string]Token{
@@ -138,4 +142,10 @@ func Keywords() map[string]Token {
 		cpy[k] = v
 	}
 	return cpy
+}
+
+// IsKeyword returns if a token is a keyword
+func IsKeyword(tok Token) bool {
+	_, ok := keywords[strings[tok]]
+	return ok
 }

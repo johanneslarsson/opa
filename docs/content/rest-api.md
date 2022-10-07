@@ -725,7 +725,7 @@ The path separator is used to access values inside object and array documents. I
 #### Query Parameters
 
 - **input** - Provide an input document. Format is a JSON value that will be used as the value for the input document.
-- **pretty** - If parameter is `true`, response will formatted for humans.
+- **pretty** - If parameter is `true`, response will be formatted for humans.
 - **provenance** - If parameter is `true`, response will include build/version info in addition to the result.  See [Provenance](#provenance) for more detail.
 - **explain** - Return query explanation in addition to result. Values: **full**.
 - **metrics** - Return query performance metrics in addition to result. See [Performance Metrics](#performance-metrics) for more detail.
@@ -738,10 +738,7 @@ The path separator is used to access values inside object and array documents. I
 - **400** - bad request
 - **500** - server error
 
-The server returns 400 if either:
-
-- The query requires the input document and the caller does not provide it.
-- The caller provides the input document but the query already defines it programmatically.
+The server returns 400 if the input document is invalid (i.e. malformed JSON).
 
 The server returns 200 if the path refers to an undefined document. In this
 case, the response will not contain a `result` property.
@@ -839,10 +836,7 @@ The request body contains an object that specifies a value for [The input Docume
 - **400** - bad request
 - **500** - server error
 
-The server returns 400 if either:
-
-1. The query requires an input document and the client did not supply one.
-2. The query already defines an input document and the client did supply one.
+The server returns 400 if the input document is invalid (i.e. malformed JSON).
 
 The server returns 200 if the path refers to an undefined document. In this
 case, the response will not contain a `result` property.
@@ -1008,6 +1002,10 @@ If the path does not refer to an existing document, the server will attempt to c
 
 The server will respect the `If-None-Match` header if it is set to `*`. In this case, the server will not overwrite an existing document located at the path.
 
+#### Query Parameters
+
+- **metrics** - Return performance metrics in addition to result. See [Performance Metrics](#performance-metrics) for more detail.
+
 #### Status Codes
 
 - **204** - no content (success)
@@ -1099,6 +1097,10 @@ DELETE /v1/data/{path:.+}
 Delete a document.
 
 The server processes the DELETE method as if the client had sent a PATCH request containing a single remove operation.
+
+#### Query Parameters
+
+- **metrics** - Return performance metrics in addition to result. See [Performance Metrics](#performance-metrics) for more detail.
 
 #### Status Codes
 
@@ -1281,10 +1283,11 @@ Evaluation in OPA, see [this post on blog.openpolicyagent.org](https://blog.open
 
 Compile API requests contain the following fields:
 
-| Field | Type | Requried | Description |
+| Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `query` | `string` | Yes | The query to partially evaluate and compile. |
 | `input` | `any` | No | The input document to use during partial evaluation (default: undefined). |
+| `options`  | `object[string, any]`           | No | Additional options to use during partial evaluation. Only `disableInlining` option is supported. (default: undefined). |
 | `unknowns` | `array[string]` | No | The terms to treat as unknown during partial evaluation (default: `["input"]`]). |
 
 #### Query Parameters
@@ -1324,6 +1327,9 @@ Content-Type: application/json
     "subject": {
       "clearance_level": 4
     }
+  },
+  "options": {
+    "disableInlining": []
   },
   "unknowns": [
     "data.reports"
@@ -1996,9 +2002,10 @@ response. To enable performance metric collection on an API call, specify the
 `metrics=true` query parameter when executing the API call. Performance metrics
 are currently supported for the following APIs:
 
-- Data API (GET and POST)
-- Policy API (all methods)
+- Policy API (PUT and DELETE)
+- Data API (GET, POST, PUT, and DELETE)
 - Query API (all methods)
+- Compile API (POST)
 
 For example:
 
@@ -2038,6 +2045,12 @@ OPA currently supports the following query performance metrics:
 - **timer_rego_module_parse_ns**: time taken (in nanoseconds) to parse the input policy module.
 - **timer_rego_module_compile_ns**: time taken (in nanoseconds) to compile the loaded policy modules.
 - **timer_server_handler_ns**: time take (in nanoseconds) to handle the API request.
+- **counter_server_query_cache_hit**: number of cache hits for the query.
+
+The `counter_server_query_cache_hit` counter gives an indication about whether OPA creates a new Rego query
+or it uses a pre-processed query which holds some prepared state to serve the API request. A pre-processed query will be
+faster to evaluate since OPA will not have to re-parse or compile it. Hence, when the query is served from the cache
+`timer_rego_query_parse_ns` and `timer_rego_query_compile_ns` timers will be omitted from the reported performance metrics.
 
 OPA also supports query instrumentation. To enable query instrumentation,
 specify the `instrument=true` query parameter when executing the API call.

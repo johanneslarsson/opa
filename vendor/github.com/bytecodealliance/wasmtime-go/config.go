@@ -92,12 +92,6 @@ func (cfg *Config) SetWasmMultiValue(enabled bool) {
 	runtime.KeepAlive(cfg)
 }
 
-// SetWasmModuleLinking configures whether the wasm module linking proposal is enabled
-func (cfg *Config) SetWasmModuleLinking(enabled bool) {
-	C.wasmtime_config_wasm_module_linking_set(cfg.ptr(), C.bool(enabled))
-	runtime.KeepAlive(cfg)
-}
-
 // SetWasmMultiMemory configures whether the wasm multi memory proposal is enabled
 func (cfg *Config) SetWasmMultiMemory(enabled bool) {
 	C.wasmtime_config_wasm_multi_memory_set(cfg.ptr(), C.bool(enabled))
@@ -110,14 +104,16 @@ func (cfg *Config) SetWasmMemory64(enabled bool) {
 	runtime.KeepAlive(cfg)
 }
 
-// SetStrategy configures what compilation strategy is used to compile wasm code
-func (cfg *Config) SetStrategy(strat Strategy) error {
-	err := C.wasmtime_config_strategy_set(cfg.ptr(), C.wasmtime_strategy_t(strat))
+// SetConsumFuel configures whether fuel is enabled
+func (cfg *Config) SetConsumeFuel(enabled bool) {
+	C.wasmtime_config_consume_fuel_set(cfg.ptr(), C.bool(enabled))
 	runtime.KeepAlive(cfg)
-	if err != nil {
-		return mkError(err)
-	}
-	return nil
+}
+
+// SetStrategy configures what compilation strategy is used to compile wasm code
+func (cfg *Config) SetStrategy(strat Strategy) {
+	C.wasmtime_config_strategy_set(cfg.ptr(), C.wasmtime_strategy_t(strat))
+	runtime.KeepAlive(cfg)
 }
 
 // SetCraneliftDebugVerifier configures whether the cranelift debug verifier will be active when
@@ -134,13 +130,9 @@ func (cfg *Config) SetCraneliftOptLevel(level OptLevel) {
 }
 
 // SetProfiler configures what profiler strategy to use for generated code
-func (cfg *Config) SetProfiler(profiler ProfilingStrategy) error {
-	err := C.wasmtime_config_profiler_set(cfg.ptr(), C.wasmtime_profiling_strategy_t(profiler))
+func (cfg *Config) SetProfiler(profiler ProfilingStrategy) {
+	C.wasmtime_config_profiler_set(cfg.ptr(), C.wasmtime_profiling_strategy_t(profiler))
 	runtime.KeepAlive(cfg)
-	if err != nil {
-		return mkError(err)
-	}
-	return nil
 }
 
 // CacheConfigLoadDefault enables compiled code caching for this `Config` using the default settings
@@ -173,10 +165,11 @@ func (cfg *Config) CacheConfigLoad(path string) error {
 	return nil
 }
 
-// SetInterruptable configures whether generated wasm code can be interrupted via interrupt
-// handles.
-func (cfg *Config) SetInterruptable(interruptable bool) {
-	C.wasmtime_config_interruptable_set(cfg.ptr(), C.bool(interruptable))
+// SetEpochInterruption enables epoch-based instrumentation of generated code to
+// interrupt WebAssembly execution when the current engine epoch exceeds a
+// defined threshold.
+func (cfg *Config) SetEpochInterruption(enable bool) {
+	C.wasmtime_config_epoch_interruption_set(cfg.ptr(), C.bool(enable))
 	runtime.KeepAlive(cfg)
 }
 

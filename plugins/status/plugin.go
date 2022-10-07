@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"reflect"
 
-	"github.com/pkg/errors"
+	prom "github.com/prometheus/client_golang/prometheus"
 
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/metrics"
@@ -65,6 +65,7 @@ type Config struct {
 	Service       string               `json:"service"`
 	PartitionName string               `json:"partition_name,omitempty"`
 	ConsoleLogs   bool                 `json:"console"`
+	Prometheus    bool                 `json:"prometheus"`
 	Trigger       *plugins.TriggerMode `json:"trigger,omitempty"` // trigger mode
 }
 
@@ -86,7 +87,7 @@ func (c *Config) validateAndInjectDefaults(services []string, pluginsList []stri
 		if !found {
 			return fmt.Errorf("invalid plugin name %q in status", *c.Plugin)
 		}
-	} else if c.Service == "" && len(services) != 0 && !c.ConsoleLogs {
+	} else if c.Service == "" && len(services) != 0 && !(c.ConsoleLogs || c.Prometheus) {
 		// For backwards compatibility allow defaulting to the first
 		// service listed, but only if console logging is disabled. If enabled
 		// we can't tell if the deployer wanted to use only console logs or
@@ -107,14 +108,9 @@ func (c *Config) validateAndInjectDefaults(services []string, pluginsList []stri
 		}
 	}
 
-	// If a plugin or service wasn't found, and console logging isn't enabled.
-	if c.Plugin == nil && c.Service == "" && !c.ConsoleLogs {
-		return fmt.Errorf("invalid status config, must have a `service`, `plugin`, or `console` logging specified")
-	}
-
 	t, err := plugins.ValidateAndInjectDefaultsForTriggerMode(trigger, c.Trigger)
 	if err != nil {
-		return errors.Wrap(err, "invalid status config")
+		return fmt.Errorf("invalid status config: %w", err)
 	}
 	c.Trigger = t
 
@@ -176,6 +172,11 @@ func (b *ConfigBuilder) Parse() (*Config, error) {
 		return nil, err
 	}
 
+	if parsedConfig.Plugin == nil && parsedConfig.Service == "" && len(b.services) == 0 && !parsedConfig.ConsoleLogs && !parsedConfig.Prometheus {
+		// Nothing to validate or inject
+		return nil, nil
+	}
+
 	if err := parsedConfig.validateAndInjectDefaults(b.services, b.plugins, b.trigger); err != nil {
 		return nil, err
 	}
@@ -231,11 +232,25 @@ func (p *Plugin) Start(ctx context.Context) error {
 	// to prevent blocking threads pushing the plugin updates.
 	p.manager.RegisterPluginStatusListener(Name, p.UpdatePluginStatus)
 
+	if p.config.Prometheus && p.manager.PrometheusRegister() != nil {
+		p.register(p.manager.PrometheusRegister(), pluginStatus, loaded, failLoad,
+			lastRequest, lastSuccessfulActivation, lastSuccessfulDownload,
+			lastSuccessfulRequest, bundleLoadDuration)
+	}
+
 	// Set the status plugin's status to OK now that everything is registered and
 	// the loop is running. This will trigger an update on the listener with the
 	// current status of all the other plugins too.
 	p.manager.UpdatePluginStatus(Name, &plugins.Status{State: plugins.StateOK})
 	return nil
+}
+
+func (p *Plugin) register(r prom.Registerer, cs ...prom.Collector) {
+	for _, c := range cs {
+		if err := r.Register(c); err != nil {
+			p.logger.Error("Status metric failed to register on prometheus :%v.", err)
+		}
+	}
 }
 
 // Stop stops the plugin.
@@ -377,6 +392,10 @@ func (p *Plugin) oneShot(ctx context.Context) error {
 		}
 	}
 
+	if p.config.Prometheus {
+		updatePrometheusMetrics(req)
+	}
+
 	if p.config.Plugin != nil {
 		proxy, ok := p.manager.Plugin(*p.config.Plugin).(Logger)
 		if !ok {
@@ -391,20 +410,13 @@ func (p *Plugin) oneShot(ctx context.Context) error {
 			Do(ctx, "POST", fmt.Sprintf("/status/%v", p.config.PartitionName))
 
 		if err != nil {
-			return errors.Wrap(err, "Status update failed")
+			return fmt.Errorf("Status update failed: %w", err)
 		}
 
 		defer util.Close(resp)
 
-		switch resp.StatusCode {
-		case http.StatusOK:
-			return nil
-		case http.StatusNotFound:
-			return fmt.Errorf("status update failed, server replied with not found")
-		case http.StatusUnauthorized:
-			return fmt.Errorf("status update failed, server replied with not authorized")
-		default:
-			return fmt.Errorf("status update failed, server replied with HTTP %v", resp.StatusCode)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("status update failed, server replied with HTTP %v %v", resp.StatusCode, http.StatusText(resp.StatusCode))
 		}
 	}
 	return nil
@@ -453,4 +465,31 @@ func (p *Plugin) logUpdate(update *UpdateRequestV1) error {
 		"type": "openpolicyagent.org/status",
 	}).Info("Status Log")
 	return nil
+}
+
+func updatePrometheusMetrics(u *UpdateRequestV1) {
+	pluginStatus.Reset()
+	for name, plugin := range u.Plugins {
+		pluginStatus.WithLabelValues(name, string(plugin.State)).Set(1)
+	}
+	lastSuccessfulActivation.Reset()
+	for _, bundle := range u.Bundles {
+		if bundle.Code == "" && !bundle.LastSuccessfulActivation.IsZero() {
+			loaded.WithLabelValues(bundle.Name).Inc()
+		} else {
+			failLoad.WithLabelValues(bundle.Name, bundle.Code, bundle.Message).Inc()
+		}
+		lastSuccessfulActivation.WithLabelValues(bundle.Name, bundle.ActiveRevision).Set(float64(bundle.LastSuccessfulActivation.UnixNano()))
+		lastSuccessfulDownload.WithLabelValues(bundle.Name).Set(float64(bundle.LastSuccessfulDownload.UnixNano()))
+		lastSuccessfulRequest.WithLabelValues(bundle.Name).Set(float64(bundle.LastSuccessfulRequest.UnixNano()))
+		lastRequest.WithLabelValues(bundle.Name).Set(float64(bundle.LastRequest.UnixNano()))
+		if bundle.Metrics != nil {
+			for stage, metric := range bundle.Metrics.All() {
+				switch stage {
+				case "timer_bundle_request_ns", "timer_rego_data_parse_ns", "timer_rego_module_parse_ns", "timer_rego_module_compile_ns", "timer_rego_load_bundles_ns":
+					bundleLoadDuration.WithLabelValues(bundle.Name, stage).Observe(float64(metric.(int64)))
+				}
+			}
+		}
+	}
 }

@@ -18,6 +18,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
@@ -155,15 +156,17 @@ type tokenEndpointResponse struct {
 // oauth2ClientCredentialsAuthPlugin represents authentication via a bearer token in the HTTP Authorization header
 // obtained through the OAuth2 client credentials flow
 type oauth2ClientCredentialsAuthPlugin struct {
-	GrantType    string                 `json:"grant_type"`
-	TokenURL     string                 `json:"token_url"`
-	ClientID     string                 `json:"client_id"`
-	ClientSecret string                 `json:"client_secret"`
-	SigningKeyID string                 `json:"signing_key"`
-	Thumbprint   string                 `json:"thumbprint"`
-	Claims       map[string]interface{} `json:"additional_claims"`
-	IncludeJti   bool                   `json:"include_jti_claim"`
-	Scopes       []string               `json:"scopes,omitempty"`
+	GrantType            string                 `json:"grant_type"`
+	TokenURL             string                 `json:"token_url"`
+	ClientID             string                 `json:"client_id"`
+	ClientSecret         string                 `json:"client_secret"`
+	SigningKeyID         string                 `json:"signing_key"`
+	Thumbprint           string                 `json:"thumbprint"`
+	Claims               map[string]interface{} `json:"additional_claims"`
+	IncludeJti           bool                   `json:"include_jti_claim"`
+	Scopes               []string               `json:"scopes,omitempty"`
+	AdditionalHeaders    map[string]string      `json:"additional_headers,omitempty"`
+	AdditionalParameters map[string]string      `json:"additional_parameters,omitempty"`
 
 	signingKey       *keys.Config
 	signingKeyParsed interface{}
@@ -328,6 +331,10 @@ func (ap *oauth2ClientCredentialsAuthPlugin) requestToken() (*oauth2Token, error
 		body.Add("scope", strings.Join(ap.Scopes, " "))
 	}
 
+	for k, v := range ap.AdditionalParameters {
+		body.Set(k, v)
+	}
+
 	r, err := http.NewRequest("POST", ap.TokenURL, strings.NewReader(body.Encode()))
 	if err != nil {
 		return nil, err
@@ -336,6 +343,10 @@ func (ap *oauth2ClientCredentialsAuthPlugin) requestToken() (*oauth2Token, error
 
 	if ap.GrantType == grantTypeClientCredentials && ap.ClientSecret != "" {
 		r.SetBasicAuth(ap.ClientID, ap.ClientSecret)
+	}
+
+	for k, v := range ap.AdditionalHeaders {
+		r.Header.Add(k, v)
 	}
 
 	client := DefaultRoundTripperClient(&tls.Config{InsecureSkipVerify: ap.tlsSkipVerify}, 10)
@@ -509,21 +520,65 @@ type awsSigningAuthPlugin struct {
 	logger logging.Logger
 }
 
+type awsCredentialServiceChain struct {
+	awsCredentialServices []awsCredentialService
+	logger                logging.Logger
+}
+
+func (acs *awsCredentialServiceChain) addService(service awsCredentialService) {
+	acs.awsCredentialServices = append(acs.awsCredentialServices, service)
+}
+
+func (acs *awsCredentialServiceChain) credentials() (awsCredentials, error) {
+	for _, service := range acs.awsCredentialServices {
+		credential, err := service.credentials()
+		if err == nil {
+			acs.logger.Debug("awsSigningAuthPlugin:%s successful",
+				reflect.TypeOf(service).String())
+			return credential, nil
+		}
+
+		acs.logger.Debug("awsSigningAuthPlugin:%s failed: %v",
+			reflect.TypeOf(service).String(), err)
+	}
+
+	return awsCredentials{}, errors.New("all AWS credential providers failed")
+}
+
 func (ap *awsSigningAuthPlugin) awsCredentialService() awsCredentialService {
+	chain := awsCredentialServiceChain{
+		logger: ap.logger,
+	}
+
+	/*
+		Here we maintain the order of addition to the chain inline with
+		the order of credential providers followed by default by the
+		AWS SDK. For example
+
+		https://docs.aws.amazon.com/AWSJavaSDK/latest/javadoc/com/amazonaws/auth/DefaultAWSCredentialsProviderChain.html
+	*/
+
 	if ap.AWSEnvironmentCredentials != nil {
 		ap.AWSEnvironmentCredentials.logger = ap.logger
-		return ap.AWSEnvironmentCredentials
+		chain.addService(ap.AWSEnvironmentCredentials)
 	}
+
 	if ap.AWSWebIdentityCredentials != nil {
 		ap.AWSWebIdentityCredentials.logger = ap.logger
-		return ap.AWSWebIdentityCredentials
+		chain.addService(ap.AWSWebIdentityCredentials)
 	}
+
+	if ap.AWSProfileCredentials != nil {
+		ap.AWSProfileCredentials.logger = ap.logger
+		chain.addService(ap.AWSProfileCredentials)
+	}
+
 	if ap.AWSMetadataCredentials != nil {
 		ap.AWSMetadataCredentials.logger = ap.logger
-		return ap.AWSMetadataCredentials
+		chain.addService(ap.AWSMetadataCredentials)
 	}
-	ap.AWSProfileCredentials.logger = ap.logger
-	return ap.AWSProfileCredentials
+
+	return &chain
 }
 
 func (ap *awsSigningAuthPlugin) NewClient(c Config) (*http.Client, error) {
@@ -555,11 +610,8 @@ func (ap *awsSigningAuthPlugin) validateConfig() error {
 	cfgs[ap.AWSWebIdentityCredentials != nil]++
 	cfgs[ap.AWSProfileCredentials != nil]++
 
-	switch n := cfgs[true]; {
-	case n == 0:
+	if cfgs[true] == 0 {
 		return errors.New("a AWS credential service must be specified when S3 signing is enabled")
-	case n > 1:
-		return errors.New("exactly one AWS credential service must be specified when S3 signing is enabled")
 	}
 
 	if ap.AWSMetadataCredentials != nil {
@@ -567,13 +619,16 @@ func (ap *awsSigningAuthPlugin) validateConfig() error {
 			return errors.New("at least aws_region must be specified for AWS metadata credential service")
 		}
 	}
+
 	if ap.AWSWebIdentityCredentials != nil {
 		if err := ap.AWSWebIdentityCredentials.populateFromEnv(); err != nil {
 			return err
 		}
 	}
+
 	if ap.AWSService == "" {
 		ap.AWSService = awsSigv4SigningDefaultService
 	}
+
 	return nil
 }

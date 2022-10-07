@@ -122,6 +122,108 @@ p = 1`,
 	})
 }
 
+func TestEvalWithOptimizeErrors(t *testing.T) {
+	files := map[string]string{
+		"x.rego": `package x
+
+p = 1`,
+	}
+
+	test.WithTempFS(files, func(path string) {
+
+		params := newEvalCommandParams()
+		params.optimizationLevel = 1
+		params.dataPaths = newrepeatedStringFlag([]string{path})
+		params.bundlePaths = repeatedStringFlag{
+			v:     []string{path},
+			isSet: true,
+		}
+
+		err := validateEvalParams(&params, []string{"data"})
+		if err == nil {
+			t.Fatal("Expected error but got nil")
+		}
+
+		expected := "specify either --data or --bundle flag with optimization level greater than 0"
+		if err.Error() != expected {
+			t.Fatalf("Expected error %v but got %v", expected, err.Error())
+		}
+
+		params = newEvalCommandParams()
+		params.optimizationLevel = 1
+		params.dataPaths = newrepeatedStringFlag([]string{path})
+
+		var buf bytes.Buffer
+
+		_, err = eval([]string{"data.test"}, params, &buf)
+		if err == nil {
+			t.Fatal("Expected error but got nil")
+		}
+
+		expected = "bundle optimizations require at least one entrypoint"
+		if err.Error() != expected {
+			t.Fatalf("Expected error %v but got %v", expected, err.Error())
+		}
+	})
+}
+
+func TestEvalWithOptimize(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+			package test
+			default p = false
+			p { q }
+			q { input.x = data.foo }`,
+		"data.json": `
+			{"foo": 1}`,
+	}
+
+	test.WithTempFS(files, func(path string) {
+
+		params := newEvalCommandParams()
+		params.optimizationLevel = 1
+		params.dataPaths = newrepeatedStringFlag([]string{path})
+		params.entrypoints = newrepeatedStringFlag([]string{"test/p"})
+
+		var buf bytes.Buffer
+
+		defined, err := eval([]string{"data.test.p"}, params, &buf)
+		if !defined || err != nil {
+			t.Fatalf("Unexpected undefined or error: %v", err)
+		}
+	})
+}
+
+func TestEvalWithOptimizeBundleData(t *testing.T) {
+	files := map[string]string{
+		"test.rego": `
+			package test
+			default p = false
+			p { q }
+			q { input.x = data.foo }`,
+		"data.json": `
+			{"foo": 1}`,
+	}
+
+	test.WithTempFS(files, func(path string) {
+
+		params := newEvalCommandParams()
+		params.optimizationLevel = 1
+		params.bundlePaths = repeatedStringFlag{
+			v:     []string{path},
+			isSet: true,
+		}
+		params.entrypoints = newrepeatedStringFlag([]string{"test/p"})
+
+		var buf bytes.Buffer
+
+		defined, err := eval([]string{"data.test.p"}, params, &buf)
+		if !defined || err != nil {
+			t.Fatalf("Unexpected undefined or error: %v", err)
+		}
+	})
+}
+
 func testEvalWithInputFile(t *testing.T, input string, query string, params evalCommandParams) error {
 	files := map[string]string{
 		"input.json": input,
@@ -500,6 +602,80 @@ func TestEvalWithSchemaFileWithRemoteRef(t *testing.T) {
 	})
 }
 
+func TestBuiltinsCapabilities(t *testing.T) {
+	tests := []struct {
+		note            string
+		policy          string
+		query           string
+		ruleName        string
+		expectedCode    string
+		expectedMessage string
+	}{
+		{
+			note:            "rego.metadata.chain() not allowed",
+			policy:          "package p\n r := rego.metadata.chain()",
+			query:           "data.p",
+			ruleName:        "rego.metadata.chain",
+			expectedCode:    "rego_type_error",
+			expectedMessage: "undefined function rego.metadata.chain",
+		},
+		{
+			note:            "rego.metadata.rule() not allowed",
+			policy:          "package p\n r := rego.metadata.rule()",
+			query:           "data.p",
+			ruleName:        "rego.metadata.rule",
+			expectedCode:    "rego_type_error",
+			expectedMessage: "undefined function rego.metadata.rule",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+
+			files := map[string]string{
+				"p.rego": tc.policy,
+			}
+
+			test.WithTempFS(files, func(path string) {
+				params := newEvalCommandParams()
+				params.capabilities.C = ast.CapabilitiesForThisVersion()
+				params.capabilities.C.Builtins = removeBuiltin(params.capabilities.C.Builtins, tc.ruleName)
+
+				_ = params.dataPaths.Set(filepath.Join(path, "p.rego"))
+
+				var buf bytes.Buffer
+				_, err := eval([]string{tc.query}, params, &buf)
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				var output presentation.Output
+				if err := util.NewJSONDecoder(&buf).Decode(&output); err != nil {
+					t.Fatal(err)
+				}
+				if exp, act := 1, len(output.Errors); exp != act {
+					t.Fatalf("expected %d errors, got %d", exp, act)
+				}
+				if code := output.Errors[0].Code; code != tc.expectedCode {
+					t.Errorf("expected code '%v', got '%v'", tc.expectedCode, code)
+				}
+				if msg := output.Errors[0].Message; msg != tc.expectedMessage {
+					t.Errorf("expected message '%v', got '%v'", tc.expectedMessage, msg)
+				}
+			})
+		})
+	}
+}
+
+func removeBuiltin(builtins []*ast.Builtin, name string) []*ast.Builtin {
+	var cpy []*ast.Builtin
+	for _, builtin := range builtins {
+		if builtin.Name != name {
+			cpy = append(cpy, builtin)
+		}
+	}
+	return cpy
+}
+
 func TestEvalReturnsRegoError(t *testing.T) {
 	buf := new(bytes.Buffer)
 	_, err := eval([]string{`{k: v | k = ["a", "a"][_]; v = [0,1][_]}`}, newEvalCommandParams(), buf)
@@ -828,4 +1004,41 @@ func kubeSchemaServer(t *testing.T) *httptest.Server {
 		}
 	}))
 	return ts
+}
+
+func TestEvalPartialFormattedOutput(t *testing.T) {
+
+	query := `time.clock(input.x) == time.clock(input.y)`
+	tests := []struct {
+		format, expected string
+	}{
+		{
+			format: evalPrettyOutput,
+			expected: `+---------+------------------------------------------+
+| Query 1 | time.clock(input.y, time.clock(input.x)) |
++---------+------------------------------------------+
+`},
+		{
+			format: evalSourceOutput,
+			expected: `# Query 1
+time.clock(input.y, time.clock(input.x))
+
+`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.format, func(t *testing.T) {
+			buf := new(bytes.Buffer)
+			params := newEvalCommandParams()
+			params.partial = true
+			_ = params.outputFormat.Set(tc.format)
+			_, err := eval([]string{query}, params, buf)
+			if err != nil {
+				t.Fatal("unexpected error:", err)
+			}
+			if actual := buf.String(); actual != tc.expected {
+				t.Errorf("expected output %q\ngot %q", tc.expected, actual)
+			}
+		})
+	}
 }

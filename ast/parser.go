@@ -10,12 +10,12 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/pkg/errors"
 	"gopkg.in/yaml.v2"
 
 	"github.com/open-policy-agent/opa/ast/internal/scanner"
@@ -99,7 +99,8 @@ type ParserOptions struct {
 	ProcessAnnotation  bool
 	AllFutureKeywords  bool
 	FutureKeywords     []string
-	unreleasedKeywords bool
+	SkipRules          bool
+	unreleasedKeywords bool // TODO(sr): cleanup
 }
 
 // NewParser creates and initializes a Parser.
@@ -135,12 +136,12 @@ func (p *Parser) WithProcessAnnotation(processAnnotation bool) *Parser {
 // WithFutureKeywords enables "future" keywords, i.e., keywords that can
 // be imported via
 //
-//     import future.keywords.kw
-//     import future.keywords.other
+//	import future.keywords.kw
+//	import future.keywords.other
 //
 // but in a more direct way. The equivalent of this import would be
 //
-//     WithFutureKeywords("kw", "other")
+//	WithFutureKeywords("kw", "other")
 func (p *Parser) WithFutureKeywords(kws ...string) *Parser {
 	p.po.FutureKeywords = kws
 	return p
@@ -149,7 +150,7 @@ func (p *Parser) WithFutureKeywords(kws ...string) *Parser {
 // WithAllFutureKeywords enables all "future" keywords, i.e., the
 // ParserOption equivalent of
 //
-//     import future.keywords
+//	import future.keywords
 func (p *Parser) WithAllFutureKeywords(yes bool) *Parser {
 	p.po.AllFutureKeywords = yes
 	return p
@@ -169,13 +170,11 @@ func (p *Parser) WithCapabilities(c *Capabilities) *Parser {
 	return p
 }
 
-const (
-	annotationScopePackage     = "package"
-	annotationScopeImport      = "import"
-	annotationScopeRule        = "rule"
-	annotationScopeDocument    = "document"
-	annotationScopeSubpackages = "subpackages"
-)
+// WithSkipRules instructs the parser not to attempt to parse Rule statements.
+func (p *Parser) WithSkipRules(skip bool) *Parser {
+	p.po.SkipRules = skip
+	return p
+}
 
 func (p *Parser) parsedTermCacheLookup() (*Term, *state) {
 	l := p.s.loc.Offset
@@ -220,7 +219,7 @@ func (p *Parser) futureParser() *Parser {
 // cache, and a scanner that knows none of the future keywords.
 // It is used to successfully parse keyword imports, like
 //
-//  import future.keywords.in
+//	import future.keywords.in
 //
 // even when the parser has already been informed about the
 // future keyword "in". This parser won't error out because
@@ -257,10 +256,6 @@ func (p *Parser) Parse() ([]Statement, []*Comment, Errors) {
 				},
 			}
 		}
-	}
-
-	if p.po.unreleasedKeywords { // TODO(sr): remove when capabilities include "every"
-		allowedFutureKeywords["every"] = tokens.Every
 	}
 
 	var err error
@@ -333,18 +328,21 @@ func (p *Parser) Parse() ([]Statement, []*Comment, Errors) {
 		}
 
 		p.restore(s)
-		s = p.save()
 
-		if rules := p.parseRules(); rules != nil {
-			for i := range rules {
-				stmts = append(stmts, rules[i])
+		if !p.po.SkipRules {
+			s = p.save()
+
+			if rules := p.parseRules(); rules != nil {
+				for i := range rules {
+					stmts = append(stmts, rules[i])
+				}
+				continue
+			} else if len(p.s.errors) > 0 {
+				break
 			}
-			continue
-		} else if len(p.s.errors) > 0 {
-			break
-		}
 
-		p.restore(s)
+			p.restore(s)
+		}
 
 		if body := p.parseQuery(true, tokens.EOF); body != nil {
 			stmts = append(stmts, body)
@@ -363,34 +361,54 @@ func (p *Parser) Parse() ([]Statement, []*Comment, Errors) {
 
 func (p *Parser) parseAnnotations(stmts []Statement) []Statement {
 
+	annotStmts, errs := parseAnnotations(p.s.comments)
+	for _, err := range errs {
+		p.error(err.Location, err.Message)
+	}
+
+	for _, annotStmt := range annotStmts {
+		stmts = append(stmts, annotStmt)
+	}
+
+	return stmts
+}
+
+func parseAnnotations(comments []*Comment) ([]*Annotations, Errors) {
+
 	var hint = []byte("METADATA")
 	var curr *metadataParser
 	var blocks []*metadataParser
 
-	for i := 0; i < len(p.s.comments); i++ {
+	for i := 0; i < len(comments); i++ {
 		if curr != nil {
-			if p.s.comments[i].Location.Row == p.s.comments[i-1].Location.Row+1 && p.s.comments[i].Location.Col == 1 {
-				curr.Append(p.s.comments[i])
+			if comments[i].Location.Row == comments[i-1].Location.Row+1 && comments[i].Location.Col == 1 {
+				curr.Append(comments[i])
 				continue
 			}
 			curr = nil
 		}
-		if bytes.HasPrefix(bytes.TrimSpace(p.s.comments[i].Text), hint) {
-			curr = newMetadataParser(p.s.comments[i].Location)
+		if bytes.HasPrefix(bytes.TrimSpace(comments[i].Text), hint) {
+			curr = newMetadataParser(comments[i].Location)
 			blocks = append(blocks, curr)
 		}
 	}
 
+	var stmts []*Annotations
+	var errs Errors
 	for _, b := range blocks {
 		a, err := b.Parse()
 		if err != nil {
-			p.error(b.loc, err.Error())
+			errs = append(errs, &Error{
+				Code:     ParseErr,
+				Message:  err.Error(),
+				Location: b.loc,
+			})
 		} else {
 			stmts = append(stmts, a)
 		}
 	}
 
-	return stmts
+	return stmts, errs
 }
 
 func (p *Parser) parsePackage() *Package {
@@ -535,7 +553,8 @@ func (p *Parser) parseRules() []*Rule {
 		return nil
 	}
 
-	if rule.Head = p.parseHead(rule.Default); rule.Head == nil {
+	usesContains := false
+	if rule.Head, usesContains = p.parseHead(rule.Default); rule.Head == nil {
 		return nil
 	}
 
@@ -548,22 +567,56 @@ func (p *Parser) parseRules() []*Rule {
 		return []*Rule{&rule}
 	}
 
-	if p.s.tok == tokens.LBrace {
+	hasIf := false
+	if p.s.tok == tokens.If {
+		hasIf = true
+	}
+
+	if hasIf && !usesContains && rule.Head.Key != nil && rule.Head.Value == nil {
+		p.illegal("invalid for partial set rule %s (use `contains`)", rule.Head.Name)
+		return nil
+	}
+
+	switch {
+	case hasIf:
+		p.scan()
+		s := p.save()
+		if expr := p.parseLiteral(); expr != nil {
+			// NOTE(sr): set literals are never false or undefined, so parsing this as
+			//  p if { true }
+			//       ^^^^^^^^ set of one element, `true`
+			// isn't valid.
+			isSetLiteral := false
+			if t, ok := expr.Terms.(*Term); ok {
+				_, isSetLiteral = t.Value.(Set)
+			}
+			// expr.Term is []*Term or Every
+			if !isSetLiteral {
+				rule.Body.Append(expr)
+				break
+			}
+		}
+
+		// parsing as literal didn't work out, expect '{ BODY }'
+		p.restore(s)
+		fallthrough
+
+	case p.s.tok == tokens.LBrace:
 		p.scan()
 		if rule.Body = p.parseBody(tokens.RBrace); rule.Body == nil {
 			return nil
 		}
 		p.scan()
-	} else {
+
+	case usesContains:
+		rule.Body = NewBody(NewExpr(BooleanTerm(true).SetLocation(rule.Location)).SetLocation(rule.Location))
+		return []*Rule{&rule}
+
+	default:
 		return nil
 	}
 
 	if p.s.tok == tokens.Else {
-
-		if rule.Head.Assign {
-			p.error(p.s.Loc(), "else keyword cannot be used on rule declared with := operator")
-			return nil
-		}
 
 		if rule.Head.Key != nil {
 			p.error(p.s.Loc(), "else keyword cannot be used on partial rules")
@@ -628,9 +681,9 @@ func (p *Parser) parseElse(head *Head) *Rule {
 	p.scan()
 
 	switch p.s.tok {
-	case tokens.LBrace:
+	case tokens.LBrace, tokens.If: // no value, but a body follows directly
 		rule.Head.Value = BooleanTerm(true)
-	case tokens.Unify:
+	case tokens.Assign, tokens.Unify:
 		p.scan()
 		rule.Head.Value = p.parseTermInfixCall()
 		if rule.Head.Value == nil {
@@ -640,6 +693,30 @@ func (p *Parser) parseElse(head *Head) *Rule {
 	default:
 		p.illegal("expected else value term or rule body")
 		return nil
+	}
+
+	hasIf := p.s.tok == tokens.If
+
+	if hasIf {
+		p.scan()
+		s := p.save()
+		if expr := p.parseLiteral(); expr != nil {
+			// NOTE(sr): set literals are never false or undefined, so parsing this as
+			//  p if false else if { true }
+			//                     ^^^^^^^^ set of one element, `true`
+			// isn't valid.
+			isSetLiteral := false
+			if t, ok := expr.Terms.(*Term); ok {
+				_, isSetLiteral = t.Value.(Set)
+			}
+			// expr.Term is []*Term or Every
+			if !isSetLiteral {
+				rule.Body.Append(expr)
+				setLocRecursive(rule.Body, rule.Location)
+				return &rule
+			}
+		}
+		p.restore(s)
 	}
 
 	if p.s.tok != tokens.LBrace {
@@ -664,7 +741,7 @@ func (p *Parser) parseElse(head *Head) *Rule {
 	return &rule
 }
 
-func (p *Parser) parseHead(defaultRule bool) *Head {
+func (p *Parser) parseHead(defaultRule bool) (*Head, bool) {
 
 	var head Head
 	head.SetLoc(p.s.Loc())
@@ -686,13 +763,13 @@ func (p *Parser) parseHead(defaultRule bool) *Head {
 		if p.s.tok != tokens.RParen {
 			head.Args = p.parseTermList(tokens.RParen, nil)
 			if head.Args == nil {
-				return nil
+				return nil, false
 			}
 		}
 		p.scan()
 
 		if p.s.tok == tokens.LBrack {
-			return nil
+			return nil, false
 		}
 	}
 
@@ -711,30 +788,39 @@ func (p *Parser) parseHead(defaultRule bool) *Head {
 		p.scan()
 	}
 
-	if p.s.tok == tokens.Unify {
+	switch p.s.tok {
+	case tokens.Contains:
+		p.scan()
+		head.Key = p.parseTermInfixCall()
+		if head.Key == nil {
+			p.illegal("expected rule key term (e.g., %s contains <VALUE> { ... })", head.Name)
+		}
+
+		return &head, true
+	case tokens.Unify:
 		p.scan()
 		head.Value = p.parseTermInfixCall()
 		if head.Value == nil {
 			p.illegal("expected rule value term (e.g., %s[%s] = <VALUE> { ... })", head.Name, head.Key)
 		}
-	} else if p.s.tok == tokens.Assign {
 
-		if defaultRule {
-			p.error(p.s.Loc(), "default rules must use = operator (not := operator)")
-			return nil
-		} else if head.Key != nil {
-			p.error(p.s.Loc(), "partial rules must use = operator (not := operator)")
-			return nil
-		} else if len(head.Args) > 0 {
-			p.error(p.s.Loc(), "functions must use = operator (not := operator)")
-			return nil
-		}
-
+	case tokens.Assign:
+		s := p.save()
 		p.scan()
 		head.Assign = true
 		head.Value = p.parseTermInfixCall()
 		if head.Value == nil {
-			p.illegal("expected rule value term (e.g., %s := <VALUE> { ... })", head.Name)
+			p.restore(s)
+			switch {
+			case len(head.Args) > 0:
+				p.illegal("expected function value term (e.g., %s(...) := <VALUE> { ... })", head.Name)
+			case head.Key != nil:
+				p.illegal("expected partial rule value term (e.g., %s[...] := <VALUE> { ... })", head.Name)
+			case defaultRule:
+				p.illegal("expected default rule value term (e.g., default %s := <VALUE>)", head.Name)
+			default:
+				p.illegal("expected rule value term (e.g., %s := <VALUE> { ... })", head.Name)
+			}
 		}
 	}
 
@@ -742,7 +828,7 @@ func (p *Parser) parseHead(defaultRule bool) *Head {
 		head.Value = BooleanTerm(true).SetLocation(head.Location)
 	}
 
-	return &head
+	return &head, false
 }
 
 func (p *Parser) parseBody(end tokens.Token) Body {
@@ -798,22 +884,46 @@ func (p *Parser) parseLiteral() (expr *Expr) {
 	}()
 
 	var negated bool
-	switch p.s.tok {
-	case tokens.Some:
-		return p.parseSome()
-	case tokens.Every:
-		return p.parseEvery()
-	case tokens.Not:
+	if p.s.tok == tokens.Not {
 		p.scan()
 		negated = true
-		fallthrough
+	}
+
+	switch p.s.tok {
+	case tokens.Some:
+		if negated {
+			p.illegal("illegal negation of 'some'")
+			return nil
+		}
+		return p.parseSome()
+	case tokens.Every:
+		if negated {
+			p.illegal("illegal negation of 'every'")
+			return nil
+		}
+		return p.parseEvery()
 	default:
+		s := p.save()
 		expr := p.parseExpr()
 		if expr != nil {
 			expr.Negated = negated
 			if p.s.tok == tokens.With {
 				if expr.With = p.parseWith(); expr.With == nil {
 					return nil
+				}
+			}
+			// If we find a plain `every` identifier, attempt to parse an every expression,
+			// add hint if it succeeds.
+			if term, ok := expr.Terms.(*Term); ok && Var("every").Equal(term.Value) {
+				var hint bool
+				t := p.save()
+				p.restore(s)
+				if expr := p.futureParser().parseEvery(); expr != nil {
+					_, hint = expr.Terms.(*Every)
+				}
+				p.restore(t)
+				if hint {
+					p.hint("`import future.keywords.every` for `every x in xs { ... }` expressions")
 				}
 			}
 			return expr
@@ -838,7 +948,8 @@ func (p *Parser) parseWith() []*With {
 			return nil
 		}
 
-		if with.Target = p.parseTerm(); with.Target == nil {
+		with.Target = p.parseTerm()
+		if with.Target == nil {
 			return nil
 		}
 
@@ -884,14 +995,29 @@ func (p *Parser) parseSome() *Expr {
 	if term := p.parseTermInfixCall(); term != nil {
 		if call, ok := term.Value.(Call); ok {
 			switch call[0].String() {
-			case Member.Name, MemberWithKey.Name: // OK
+			case Member.Name:
+				if len(call) != 3 {
+					p.illegal("illegal domain")
+					return nil
+				}
+			case MemberWithKey.Name:
+				if len(call) != 4 {
+					p.illegal("illegal domain")
+					return nil
+				}
 			default:
 				p.illegal("expected `x in xs` or `x, y in xs` expression")
 				return nil
 			}
 
 			decl.Symbols = []*Term{term}
-			return NewExpr(decl).SetLocation(decl.Location)
+			expr := NewExpr(decl).SetLocation(decl.Location)
+			if p.s.tok == tokens.With {
+				if expr.With = p.parseWith(); expr.With == nil {
+					return nil
+				}
+			}
+			return expr
 		}
 	}
 
@@ -953,9 +1079,17 @@ func (p *Parser) parseEvery() *Expr {
 	}
 	switch call[0].String() {
 	case Member.Name: // x in xs
+		if len(call) != 3 {
+			p.illegal("illegal domain")
+			return nil
+		}
 		qb.Value = call[1]
 		qb.Domain = call[2]
 	case MemberWithKey.Name: // k, v in xs
+		if len(call) != 4 {
+			p.illegal("illegal domain")
+			return nil
+		}
 		qb.Key = call[1]
 		qb.Value = call[2]
 		qb.Domain = call[3]
@@ -979,7 +1113,14 @@ func (p *Parser) parseEvery() *Expr {
 		}
 		p.scan()
 		qb.Body = body
-		return NewExpr(qb).SetLocation(qb.Location)
+		expr := NewExpr(qb).SetLocation(qb.Location)
+
+		if p.s.tok == tokens.With {
+			if expr.With = p.parseWith(); expr.With == nil {
+				return nil
+			}
+		}
+		return expr
 	}
 
 	p.illegal("missing body")
@@ -1049,7 +1190,6 @@ func (p *Parser) parseTermIn(lhs *Term, keyVal bool, offset int) *Term {
 				}
 			}
 			p.restore(s)
-			return nil
 		}
 		if op := p.parseTermOpName(Member.Ref(), tokens.In); op != nil {
 			if rhs := p.parseTermRelation(nil, p.s.loc.Offset); rhs != nil {
@@ -1187,7 +1327,7 @@ func (p *Parser) parseTerm() *Term {
 		term = p.parseNumber()
 	case tokens.String:
 		term = p.parseString()
-	case tokens.Ident:
+	case tokens.Ident, tokens.Contains: // NOTE(sr): contains anywhere BUT in rule heads gets no special treatment
 		term = p.parseVar()
 	case tokens.LBrack:
 		term = p.parseArray()
@@ -1805,7 +1945,10 @@ func (p *Parser) illegal(note string, a ...interface{}) {
 	}
 
 	tokType := "token"
-	if p.s.tok >= tokens.Package && p.s.tok <= tokens.False {
+	if tokens.IsKeyword(p.s.tok) {
+		tokType = "keyword"
+	}
+	if _, ok := futureKeywords[p.s.tok.String()]; ok {
 		tokType = "keyword"
 	}
 
@@ -1936,9 +2079,17 @@ func (p *Parser) validateDefaultRuleValue(rule *Rule) bool {
 	return valid
 }
 
+// We explicitly use yaml unmarshalling, to accommodate for the '_' in 'related_resources',
+// which isn't handled properly by json for some reason.
 type rawAnnotation struct {
-	Scope   string                `json:"scope"`
-	Schemas []rawSchemaAnnotation `json:"schemas"`
+	Scope            string                 `yaml:"scope"`
+	Title            string                 `yaml:"title"`
+	Description      string                 `yaml:"description"`
+	Organizations    []string               `yaml:"organizations"`
+	RelatedResources []interface{}          `yaml:"related_resources"`
+	Authors          []interface{}          `yaml:"authors"`
+	Schemas          []rawSchemaAnnotation  `yaml:"schemas"`
+	Custom           map[string]interface{} `yaml:"custom"`
 }
 
 type rawSchemaAnnotation map[string]interface{}
@@ -1987,12 +2138,20 @@ func (b *metadataParser) Parse() (*Annotations, error) {
 
 	var result Annotations
 	result.Scope = raw.Scope
+	result.Title = raw.Title
+	result.Description = raw.Description
+	result.Organizations = raw.Organizations
+
+	for _, v := range raw.RelatedResources {
+		rr, err := parseRelatedResource(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid related-resource definition %s: %w", v, err)
+		}
+		result.RelatedResources = append(result.RelatedResources, rr)
+	}
 
 	for _, pair := range raw.Schemas {
-		var k string
-		var v interface{}
-		for k, v = range pair {
-		}
+		k, v := unwrapPair(pair)
 
 		var a SchemaAnnotation
 		var err error
@@ -2011,7 +2170,7 @@ func (b *metadataParser) Parse() (*Annotations, error) {
 		case map[interface{}]interface{}:
 			w, err := convertYAMLMapKeyTypes(v, nil)
 			if err != nil {
-				return nil, errors.Wrap(err, "invalid schema definition")
+				return nil, fmt.Errorf("invalid schema definition: %w", err)
 			}
 			a.Definition = &w
 		default:
@@ -2021,8 +2180,31 @@ func (b *metadataParser) Parse() (*Annotations, error) {
 		result.Schemas = append(result.Schemas, &a)
 	}
 
+	for _, v := range raw.Authors {
+		author, err := parseAuthor(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid author definition %s: %w", v, err)
+		}
+		result.Authors = append(result.Authors, author)
+	}
+
+	result.Custom = make(map[string]interface{})
+	for k, v := range raw.Custom {
+		val, err := convertYAMLMapKeyTypes(v, nil)
+		if err != nil {
+			return nil, err
+		}
+		result.Custom[k] = val
+	}
+
 	result.Location = b.loc
 	return &result, nil
+}
+
+func unwrapPair(pair map[string]interface{}) (k string, v interface{}) {
+	for k, v = range pair {
+	}
+	return
 }
 
 var errInvalidSchemaRef = fmt.Errorf("invalid schema reference")
@@ -2047,6 +2229,96 @@ func parseSchemaRef(s string) (Ref, error) {
 	}
 
 	return nil, errInvalidSchemaRef
+}
+
+func parseRelatedResource(rr interface{}) (*RelatedResourceAnnotation, error) {
+	rr, err := convertYAMLMapKeyTypes(rr, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	switch rr := rr.(type) {
+	case string:
+		if len(rr) > 0 {
+			u, err := url.Parse(rr)
+			if err != nil {
+				return nil, err
+			}
+			return &RelatedResourceAnnotation{Ref: *u}, nil
+		}
+		return nil, fmt.Errorf("ref URL may not be empty string")
+	case map[string]interface{}:
+		description := strings.TrimSpace(getSafeString(rr, "description"))
+		ref := strings.TrimSpace(getSafeString(rr, "ref"))
+		if len(ref) > 0 {
+			u, err := url.Parse(ref)
+			if err != nil {
+				return nil, err
+			}
+			return &RelatedResourceAnnotation{Description: description, Ref: *u}, nil
+		}
+		return nil, fmt.Errorf("'ref' value required in object")
+	}
+
+	return nil, fmt.Errorf("invalid value type, must be string or map")
+}
+
+func parseAuthor(a interface{}) (*AuthorAnnotation, error) {
+	a, err := convertYAMLMapKeyTypes(a, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	switch a := a.(type) {
+	case string:
+		return parseAuthorString(a)
+	case map[string]interface{}:
+		name := strings.TrimSpace(getSafeString(a, "name"))
+		email := strings.TrimSpace(getSafeString(a, "email"))
+		if len(name) > 0 || len(email) > 0 {
+			return &AuthorAnnotation{name, email}, nil
+		}
+		return nil, fmt.Errorf("'name' and/or 'email' values required in object")
+	}
+
+	return nil, fmt.Errorf("invalid value type, must be string or map")
+}
+
+func getSafeString(m map[string]interface{}, k string) string {
+	if v, found := m[k]; found {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+const emailPrefix = "<"
+const emailSuffix = ">"
+
+// parseAuthor parses a string into an AuthorAnnotation. If the last word of the input string is enclosed within <>,
+// it is extracted as the author's email. The email may not contain whitelines, as it then will be interpreted as
+// multiple words.
+func parseAuthorString(s string) (*AuthorAnnotation, error) {
+	parts := strings.Fields(s)
+
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("author is an empty string")
+	}
+
+	namePartCount := len(parts)
+	trailing := parts[namePartCount-1]
+	var email string
+	if len(trailing) >= len(emailPrefix)+len(emailSuffix) && strings.HasPrefix(trailing, emailPrefix) &&
+		strings.HasSuffix(trailing, emailSuffix) {
+		email = trailing[len(emailPrefix):]
+		email = email[0 : len(email)-len(emailSuffix)]
+		namePartCount = namePartCount - 1
+	}
+
+	name := strings.Join(parts[0:namePartCount], " ")
+
+	return &AuthorAnnotation{Name: name, Email: email}, nil
 }
 
 func convertYAMLMapKeyTypes(x interface{}, path []string) (interface{}, error) {
@@ -2081,8 +2353,10 @@ func convertYAMLMapKeyTypes(x interface{}, path []string) (interface{}, error) {
 // futureKeywords is the source of truth for future keywords that will
 // eventually become standard keywords inside of Rego.
 var futureKeywords = map[string]tokens.Token{
-	"in":    tokens.In,
-	"every": tokens.Every,
+	"in":       tokens.In,
+	"every":    tokens.Every,
+	"contains": tokens.Contains,
+	"if":       tokens.If,
 }
 
 func (p *Parser) futureImport(imp *Import, allowedFutureKeywords map[string]tokens.Token) {
@@ -2094,7 +2368,7 @@ func (p *Parser) futureImport(imp *Import, allowedFutureKeywords map[string]toke
 	}
 
 	if imp.Alias != "" {
-		p.errorf(imp.Path.Location, "future keyword imports cannot be aliased")
+		p.errorf(imp.Path.Location, "`future` imports cannot be aliased")
 		return
 	}
 
@@ -2105,12 +2379,6 @@ func (p *Parser) futureImport(imp *Import, allowedFutureKeywords map[string]toke
 
 	switch len(path) {
 	case 2: // all keywords imported, nothing to do
-		// TODO(sr): remove when ready
-		for i, kw := range kwds {
-			if kw == "every" {
-				kwds = append(kwds[:i], kwds[i+1:]...)
-			}
-		}
 	case 3: // one keyword imported
 		kw, ok := path[2].Value.(String)
 		if !ok {

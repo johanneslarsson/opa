@@ -152,14 +152,7 @@ allow {
 }
 ```
 
-The annotation must be specified as YAML within a comment block that **must** start with `# METADATA`. Also, every line in the comment block containing the annotation **must** start at Column 1 in the module/file, or otherwise, they will be ignored.
-
-> 🚨 OPA will attempt to parse the YAML document in comments following the
-> initial `# METADATA` comment. If the YAML document cannot be parsed, OPA will
-> return an error. If you need to include additional comments between the
-> comment block and the next statement, include a blank line immediately after
-> the comment block containing the YAML document. This tells OPA that the
-> comment block containing the YAML document is finished
+See the [annotations documentation](../annotations) for general information relating to annotations.
 
 The `schemas` field specifies an array associating schemas to data values. Paths must start with `input` or `data` (i.e., they must be fully-qualified.)
 
@@ -174,7 +167,7 @@ package policy
 
 import data.acl
 
-default allow = false
+default allow := false
 
 # METADATA
 # schemas:
@@ -212,18 +205,7 @@ Note that the second `allow` rule doesn't have a METADATA comment block attached
 
 On a different note, schema annotations can also be added to policy files part of a bundle package loaded via `opa eval --bundle` alongwith the `--schema` parameter for type checking a set of `*.rego` policy files.
 
-### Annotation Scopes
-
-Annotations can be defined at the rule or package level. The `scope` field on
-the annotation determines how the schema annotation will be applied. If the
-`scope` field is omitted, it defaults to the scope for the statement that
-immediately follows the annotation. The `scope` values that are currently
-supported are:
-
-* `rule` - applies to the individual rule statement
-* `document` - applies to all of the rules with the same name in the same package
-* `package` - applies to all of the rules in the package
-* `subpackages` - applies to all of the rules in the package and all subpackages (recursively)
+The *scope* of the `schema` annotation can be controlled through the [scope](../annotations#scope) annotation
 
 In case of overlap, schema annotations override each other as follows:
 
@@ -233,7 +215,8 @@ document overrides package
 package overrides subpackages
 ```
 
-The following sections explain how the different scopes work.
+The following sections explain how the different scopes affect `schema` annotation
+overriding for type checking.
 
 #### Rule and Document Scopes
 
@@ -286,12 +269,6 @@ allow {
 
 In this example, the annotation with `document` scope has the same affect as the
 two `rule` scoped annotations in the previous example.
-
-Since the `document` scope annotation applies to all rules with the same name in
-the same package (which can span multiple files) and there is no ordering across
-files in the same package, `document` scope annotations can only be specified
-**once** per rule set. The `document` scope annotation can be applied to any
-rule in the set (i.e., ordering does not matter.)
 
 #### Package and Subpackage Scopes
 
@@ -408,7 +385,7 @@ package policy
 
 import data.acl
 
-default allow = false
+default allow := false
 
 # METADATA
 # scope: rule
@@ -460,14 +437,14 @@ Specifically, `anyOf` acts as an Rego Or type where at least one (can be more th
 
 `policy-anyOf.rego`
 ```
-package kubernetes.admission  
+package kubernetes.admission
 
 # METADATA
 # scope: rule
-# schemas: 
-#   - input: schema["input-anyOf"] 
-deny {                                                                
-    input.request.servers.versions == "Pod"                       
+# schemas:
+#   - input: schema["input-anyOf"]
+deny {
+    input.request.servers.versions == "Pod"
 }
 ```
 
@@ -535,14 +512,14 @@ Specifically, `allOf` keyword implies that all conditions under `allOf` within a
 
 `policy-allOf.rego`
 ```
-package kubernetes.admission  
+package kubernetes.admission
 
 # METADATA
 # scope: rule
-# schemas: 
-#   - input: schema["input-allof"] 
-deny {                                                                
-    input.request.servers.versions == "Pod"                       
+# schemas:
+#   - input: schema["input-allof"]
+deny {
+    input.request.servers.versions == "Pod"
 }
 ```
 

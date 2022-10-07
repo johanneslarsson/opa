@@ -89,9 +89,6 @@ func TestFormatSource(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to read rego source: %v", err)
 			}
-			if bytes.Contains(contents, []byte(`import future.keywords.every`)) {
-				t.Skip("TODO: uncomment 'every' tests")
-			}
 
 			expected, err := ioutil.ReadFile(rego + ".formatted")
 			if err != nil {
@@ -251,6 +248,53 @@ func TestFormatAST(t *testing.T) {
 			expected: `some x, y in xs`,
 		},
 		{
+			note: "every adds import if missing",
+			toFmt: ast.MustParseModuleWithOpts(`package test
+			p {
+				every k, v in [1, 2] { k != v }
+			}`,
+				ast.ParserOptions{FutureKeywords: []string{"every"}}),
+			expected: `package test
+
+import future.keywords.every
+
+p {
+	every k, v in [1, 2] { k != v }
+}`,
+		},
+		{
+			note: "every does not add import if all future KWs are there",
+			toFmt: ast.MustParseModuleWithOpts(`package test
+			import future.keywords
+			p {
+				every k, v in [1, 2] { k != v }
+			}`,
+				ast.ParserOptions{FutureKeywords: []string{"every"}}),
+			expected: `package test
+
+import future.keywords
+
+p if {
+	every k, v in [1, 2] { k != v }
+}`,
+		},
+		{
+			note: "every does not add import if already present",
+			toFmt: ast.MustParseModuleWithOpts(`package test
+			import future.keywords
+			p {
+				every k, v in [1, 2] { k != v }
+			}`,
+				ast.ParserOptions{FutureKeywords: []string{"every"}}),
+			expected: `package test
+
+import future.keywords
+
+p if {
+	every k, v in [1, 2] { k != v }
+}`,
+		},
+		{
 			note: "body shared wildcard",
 			toFmt: ast.Body{
 				&ast.Expr{
@@ -382,6 +426,23 @@ a[_x[y][[z, w]]]`,
 			}(),
 			expected: `["foo", __local1__] = split(input.foo, ":")`,
 		},
+		{
+			note: "expr where generated var has an AST location not matching its source location",
+			toFmt: func() *ast.Expr {
+				e := ast.MustParseExpr(`__local0__ = concat(",", [__local1__])`)
+				ast.WalkTerms(e, func(t *ast.Term) bool {
+					t.Location.File = "t.rego"
+					return false
+				})
+				// mangling that may happen in PE
+				return ast.Concat.Expr(
+					e.Operand(1).Value.(ast.Call)[1],
+					e.Operand(1).Value.(ast.Call)[2],
+					e.Operand(0),
+				).SetLocation(e.Location)
+			}(),
+			expected: `concat(",", [__local1__], __local0__)`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -394,6 +455,17 @@ a[_x[y][[z, w]]]`,
 			actual := strings.TrimSpace(string(bs))
 			if actual != expected {
 				t.Fatalf("Expected:\n\n%q\n\nGot:\n\n%q\n\n", expected, actual)
+			}
+		})
+
+		// consistency check: disregarding source locations, it shouldn't panic
+		t.Run("no_loc/"+tc.note, func(t *testing.T) {
+			_, err := AstWithOpts(tc.toFmt, Opts{IgnoreLocations: true})
+			if err != nil {
+				t.Fatalf("Unexpected error: %s", err)
+			}
+			if err != nil {
+				t.Fatalf("Unexpected error: %s", err)
 			}
 		})
 	}

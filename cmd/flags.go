@@ -6,7 +6,6 @@ package cmd
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/pflag"
 
@@ -70,6 +69,10 @@ func addOutputFormat(fs *pflag.FlagSet, outputFormat *util.EnumFlag) {
 	fs.VarP(outputFormat, "format", "f", "set output format")
 }
 
+func addListAnnotations(fs *pflag.FlagSet, value *bool) {
+	fs.BoolVarP(value, "annotations", "a", false, "list annotations")
+}
+
 func addBenchmemFlag(fs *pflag.FlagSet, benchMem *bool, value bool) {
 	fs.BoolVar(benchMem, "benchmem", value, "report memory allocations with benchmark results")
 }
@@ -123,7 +126,7 @@ func addBundleVerificationExcludeFilesFlag(fs *pflag.FlagSet, excludeNames *[]st
 }
 
 func addCapabilitiesFlag(fs *pflag.FlagSet, f *capabilitiesFlag) {
-	fs.VarP(f, "capabilities", "", "set capabilities.json file path")
+	fs.VarP(f, "capabilities", "", "set capabilities version or capabilities.json file path")
 }
 
 func addPartialFlag(fs *pflag.FlagSet, partial *bool, value bool) {
@@ -150,6 +153,10 @@ func addStrictFlag(fs *pflag.FlagSet, strict *bool, value bool) {
 	fs.BoolVarP(strict, "strict", "S", value, "enable compiler strict mode")
 }
 
+func addE2EFlag(fs *pflag.FlagSet, e2e *bool, value bool) {
+	fs.BoolVar(e2e, "e2e", value, "run benchmarks against a running OPA server")
+}
+
 const (
 	explainModeOff   = "off"
 	explainModeFull  = "full"
@@ -166,8 +173,8 @@ func setExplainFlag(fs *pflag.FlagSet, explain *util.EnumFlag) {
 }
 
 type capabilitiesFlag struct {
-	C    *ast.Capabilities
-	path string
+	C             *ast.Capabilities
+	pathOrVersion string
 }
 
 func newcapabilitiesFlag() *capabilitiesFlag {
@@ -183,18 +190,23 @@ func (f *capabilitiesFlag) Type() string {
 }
 
 func (f *capabilitiesFlag) String() string {
-	return f.path
+	return f.pathOrVersion
 }
 
 func (f *capabilitiesFlag) Set(s string) error {
-	f.path = s
-	fd, err := os.Open(s)
-	if err != nil {
-		return err
+	f.pathOrVersion = s
+	var errPath, errVersion error
+
+	f.C, errPath = ast.LoadCapabilitiesFile(s)
+	if errPath != nil {
+		f.C, errVersion = ast.LoadCapabilitiesVersion(s)
 	}
-	defer fd.Close()
-	f.C, err = ast.LoadCapabilitiesJSON(fd)
-	return err
+
+	if errVersion != nil && errPath != nil {
+		return fmt.Errorf("no such file or capabilities version found: %v", s)
+	}
+	return nil
+
 }
 
 type stringptrFlag struct {

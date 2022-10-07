@@ -24,6 +24,8 @@ Example with bundle and input data:
 
 To enable more detailed analysis use the --metrics and --benchmem flags.
 
+To run benchmarks against a running OPA server to evaluate server overhead use the --e2e flag.
+
 The optional "gobench" output format conforms to the Go Benchmark Data Format.
 
 
@@ -38,6 +40,7 @@ opa bench <query> [flags]
   -b, --bundle string                  set bundle file(s) or directory path(s). This flag can be repeated.
       --count int                      number of times to repeat each benchmark (default 1)
   -d, --data string                    set policy or data file(s). This flag can be repeated.
+      --e2e                            run benchmarks against a running OPA server
       --fail                           exits with non-zero exit code on undefined/empty result and errors (default true)
   -f, --format {json,pretty,gobench}   set output format (default pretty)
   -h, --help                           help for bench
@@ -48,6 +51,8 @@ opa bench <query> [flags]
       --package string                 set query package
   -p, --partial                        perform partial evaluation
   -s, --schema string                  set schema file path or directory path
+      --shutdown-grace-period int      set the time (in seconds) that the server will wait to gracefully shut down. This flag is valid in 'e2e' mode only. (default 10)
+      --shutdown-wait-period int       set the time (in seconds) that the server will wait before initiating shutdown. This flag is valid in 'e2e' mode only.
       --stdin                          read query from stdin
   -I, --stdin-input                    read input document from stdin
   -t, --target {rego,wasm}             set the runtime to exercise (default rego)
@@ -118,6 +123,11 @@ The 'build' command supports targets (specified by -t):
     wasm    The wasm target emits a bundle containing a WebAssembly module compiled from
             the input files for each specified entrypoint. The bundle may contain the
             original policy or data files.
+
+    plan    The plan target emits a bundle containing a plan, i.e., an intermediate
+			representation compiled from the input files for each specified entrypoint.
+			This is for further processing, OPA cannot evaluate a "plan bundle" like it
+			can evaluate a wasm or rego bundle.
 
 The -e flag tells the 'build' command which documents will be queried by the software
 asking for policy decisions, so that it can focus optimization efforts and ensure
@@ -206,7 +216,7 @@ The OPA repository contains a set of capabilities files for each OPA release. Fo
 the following command builds a directory of policies ('./policies') and validates them
 against OPA v0.22.0:
 
-    opa build ./policies --capabilities $OPA_SRC/capabilities/v0.22.0.json
+    opa build ./policies --capabilities v0.22.0
 
 
 ```
@@ -217,7 +227,7 @@ opa build <path> [<path> [...]] [flags]
 
 ```
   -b, --bundle                         load paths as bundle files or root directories
-      --capabilities string            set capabilities.json file path
+      --capabilities string            set capabilities version or capabilities.json file path
       --claims-file string             set path of JSON file containing optional claims (see: https://www.openpolicyagent.org/docs/latest/management-bundles/#signature-format)
       --debug                          enable debug output
   -e, --entrypoint string              set slash separated entrypoint path
@@ -226,14 +236,80 @@ opa build <path> [<path> [...]] [flags]
       --ignore strings                 set file and directory names to ignore during loading (e.g., '.*' excludes hidden files)
   -O, --optimize int                   set optimization level
   -o, --output string                  set the output filename (default "bundle.tar.gz")
+      --prune-unused                   exclude dependents of entrypoints
   -r, --revision string                set output bundle revision
       --scope string                   scope to use for bundle signature verification
       --signing-alg string             name of the signing algorithm (default "RS256")
       --signing-key string             set the secret (HMAC) or path of the PEM file containing the private key (RSA and ECDSA)
       --signing-plugin string          name of the plugin to use for signing/verification (see https://www.openpolicyagent.org/docs/latest/management-bundles/#signature-plugin
-  -t, --target {rego,wasm}             set the output bundle target type (default rego)
+  -t, --target {rego,wasm,plan}        set the output bundle target type (default rego)
       --verification-key string        set the secret (HMAC) or path of the PEM file containing the public key (RSA and ECDSA)
       --verification-key-id string     name assigned to the verification key used for bundle verification (default "default")
+```
+
+____
+
+## opa capabilities
+
+Print the capabilities of OPA
+
+### Synopsis
+
+Show capabilities for OPA.
+
+The 'capabilities' command prints the OPA capabilities, prior to and including the version of OPA used.
+
+Print a list of all existing capabilities version names
+
+    $ opa capabilities
+    v0.17.0
+    v0.17.1
+    ...
+    v0.37.1
+    v0.37.2
+    v0.38.0
+    ...
+
+Print the capabilities of the current version
+
+    $ opa capabilities --current
+    {
+        "builtins": [...],
+        "future_keywords": [...],
+        "wasm_abi_versions": [...]
+    }
+
+Print the capabilities of a specific version
+
+    $ opa capabilities --version v0.32.1
+    {
+        "builtins": [...],
+        "future_keywords": null,
+        "wasm_abi_versions": [...]
+    }
+
+Print the capabilities of a capabilities file
+
+    $ opa capabilities --file ./capabilities/v0.32.1.json
+    {
+        "builtins": [...],
+        "future_keywords": null,
+        "wasm_abi_versions": [...]
+    }
+
+
+
+```
+opa capabilities [flags]
+```
+
+### Options
+
+```
+      --current          print current capabilities
+      --file string      print current capabilities
+  -h, --help             help for capabilities
+      --version string   print capabilities of a specific version
 ```
 
 ____
@@ -258,7 +334,7 @@ opa check <path> [path [...]] [flags]
 
 ```
   -b, --bundle                 load paths as bundle files or root directories
-      --capabilities string    set capabilities.json file path
+      --capabilities string    set capabilities version or capabilities.json file path
   -f, --format {pretty,json}   set output format (default pretty)
   -h, --help                   help for check
       --ignore strings         set file and directory names to ignore during loading (e.g., '.*' excludes hidden files)
@@ -272,6 +348,42 @@ ____
 ## opa deps
 
 Analyze Rego query dependencies
+
+### Synopsis
+
+Print dependencies of provided query.
+
+Dependencies are categorized as either base documents, which is any data loaded
+from the outside world, or virtual documents, i.e values that are computed from rules.
+
+### Example
+
+Given a policy like this:
+
+	package policy
+
+	import future.keywords.if
+	import future.keywords.in
+
+	allow if is_admin
+
+	is_admin if "admin" in input.user.roles
+
+To evaluate the dependencies of a simple query (e.g. data.policy.allow),
+we'd run opa deps like demonstrated below:
+
+	$ opa deps --data policy.rego data.policy.allow
+	+------------------+----------------------+
+	|  BASE DOCUMENTS  |  VIRTUAL DOCUMENTS   |
+	+------------------+----------------------+
+	| input.user.roles | data.policy.allow    |
+	|                  | data.policy.is_admin |
+	+------------------+----------------------+
+
+From the output we're able to determine that the allow rule depends on
+the input.user.roles base document, as well as the virtual document (rule)
+data.policy.is_admin.
+
 
 ```
 opa deps <query> [flags]
@@ -302,11 +414,11 @@ Evaluate a Rego query and print the result.
 
 To evaluate a simple query:
 
-    $ opa eval 'x = 1; y = 2; x < y'
+    $ opa eval 'x := 1; y := 2; x < y'
 
 To evaluate a query against JSON data:
 
-    $ opa eval --data data.json 'data.names[_] = name'
+    $ opa eval --data data.json 'name := data.names[_]'
 
 To evaluate a query against JSON data supplied with a file:// URL:
 
@@ -345,6 +457,13 @@ on bundle directory structures.
 
 The --data flag can be used to recursively load ALL *.rego, *.json, and
 *.yaml files under the specified directory.
+
+The -O flag controls the optimization level. By default, optimization is disabled (-O=0).
+When optimization is enabled the 'eval' command generates a bundle from the files provided
+with either the --bundle or --data flag. This bundle is semantically equivalent to the input
+files however the structure of the files in the bundle may have been changed by rewriting, inlining,
+pruning, etc. This resulting optimized bundle is used to evaluate the query. If optimization is enabled
+at least one entrypoint (-e) must be supplied.
 
 ### Output Formats
 
@@ -398,13 +517,14 @@ opa eval <query> [flags]
 
 ```
   -b, --bundle string                                     set bundle file(s) or directory path(s). This flag can be repeated.
-      --capabilities string                               set capabilities.json file path
+      --capabilities string                               set capabilities version or capabilities.json file path
       --count int                                         number of times to repeat each benchmark (default 1)
       --coverage                                          report coverage
   -d, --data string                                       set policy or data file(s). This flag can be repeated.
       --disable-early-exit                                disable 'early exit' optimizations
       --disable-indexing                                  disable indexing optimizations
       --disable-inlining stringArray                      set paths of documents to exclude from inlining
+  -e, --entrypoint string                                 set slash separated entrypoint path
       --explain {off,full,notes,fails}                    enable query explanations (default off)
       --fail                                              exits with non-zero exit code on undefined/empty result and errors
       --fail-defined                                      exits with non-zero exit code on defined/non-empty result and errors
@@ -415,6 +535,7 @@ opa eval <query> [flags]
   -i, --input string                                      set input file path
       --instrument                                        enable query instrumentation metrics (implies --metrics)
       --metrics                                           report query performance metrics
+  -O, --optimize int                                      set optimization level
       --package string                                    set query package
   -p, --partial                                           perform partial evaluation
       --pretty-limit int                                  set limit after which pretty output gets truncated (default 80)
@@ -472,6 +593,7 @@ opa exec <path> [<path> [...]] [flags]
   -h, --help                                 help for exec
       --log-format {text,json,json-pretty}   set log format (default json)
   -l, --log-level {debug,info,error}         set log level (default error)
+      --log-timestamp-format string          set log timestamp format (OPA_LOG_TIMESTAMP_FORMAT environment variable)
       --set stringArray                      override config values on the command line (use commas to specify multiple values)
       --set-file stringArray                 override config values with files on the command line (use commas to specify multiple values)
 ```
@@ -537,13 +659,13 @@ the following:
 * manifest data
 * signature data
 * information about the Wasm module files
+* package- and rule annotations
 
 Example:
 
-  $ ls
-  bundle.tar.gz
-
-  $ opa inspect bundle.tar.gz
+    $ ls
+    bundle.tar.gz
+    $ opa inspect bundle.tar.gz
 
 You can provide exactly one OPA bundle or path to the 'inspect' command on the command-line. If you provide a path
 referring to a directory, the 'inspect' command will load that path as a bundle and summarize its structure and contents.
@@ -556,6 +678,7 @@ opa inspect <path> [<path> [...]] [flags]
 ### Options
 
 ```
+  -a, --annotations            list annotations
   -f, --format {json,pretty}   set output format (default pretty)
   -h, --help                   help for inspect
 ```
@@ -693,6 +816,7 @@ opa run [flags]
   -b, --bundle                               load paths as bundle files or root directories
   -c, --config-file string                   set path of configuration file
       --diagnostic-addr strings              set read-only diagnostic listening address of the server for /health and /metric APIs (e.g., [ip]:<port> for TCP, unix://<path> for UNIX domain socket)
+      --disable-telemetry                    disables anonymous information reporting (see: https://www.openpolicyagent.org/docs/latest/privacy)
       --exclude-files-verify strings         set file names to exclude during bundle verification
   -f, --format string                        set shell output format, i.e, pretty, json (default "pretty")
       --h2c                                  enable H2C for HTTP listeners
@@ -701,6 +825,7 @@ opa run [flags]
       --ignore strings                       set file and directory names to ignore during loading (e.g., '.*' excludes hidden files)
       --log-format {text,json,json-pretty}   set log format (default json)
   -l, --log-level {debug,info,error}         set log level (default info)
+      --log-timestamp-format string          set log timestamp format (OPA_LOG_TIMESTAMP_FORMAT environment variable)
   -m, --max-errors int                       set the number of errors to allow before compilation fails early (default 10)
       --min-tls-version {1.0,1.1,1.2,1.3}    set minimum TLS version to be used by OPA's server (default 1.2)
       --pprof                                enables pprof endpoints
@@ -713,7 +838,6 @@ opa run [flags]
       --shutdown-wait-period int             set the time (in seconds) that the server will wait before initiating shutdown
       --signing-alg string                   name of the signing algorithm (default "RS256")
       --skip-verify                          disables bundle signature verification
-      --skip-version-check                   disables anonymous version reporting (see: https://www.openpolicyagent.org/docs/latest/privacy)
       --tls-ca-cert-file string              set path of TLS CA cert file
       --tls-cert-file string                 set path of TLS certificate file
       --tls-cert-refresh-period duration     set certificate refresh period
@@ -855,20 +979,23 @@ Example policy (example/authz.rego):
 
 	package authz
 
-	allow {
-		input.path = ["users"]
-		input.method = "POST"
+	import future.keywords.if
+
+	allow if {
+		input.path == ["users"]
+		input.method == "POST"
 	}
 
-	allow {
-		input.path = ["users", profile_id]
-		input.method = "GET"
-		profile_id = input.user_id
+	allow if {
+		input.path == ["users", input.user_id]
+		input.method == "GET"
 	}
 
 Example test (example/authz_test.rego):
 
-	package authz
+	package authz_test
+
+	import data.authz.allow
 
 	test_post_allowed {
 		allow with input as {"path": ["users"], "method": "POST"}
@@ -913,6 +1040,7 @@ opa test <path> [path [...]] [flags]
       --bench                          benchmark the unit tests
       --benchmem                       report memory allocations with benchmark results (default true)
   -b, --bundle                         load paths as bundle files or root directories
+      --capabilities string            set capabilities version or capabilities.json file path
       --count int                      number of times to repeat each test (default 1)
   -c, --coverage                       report coverage (overrides debug tracing)
   -z, --exit-zero-on-skipped           skipped tests return status 0

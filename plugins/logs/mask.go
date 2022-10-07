@@ -21,8 +21,9 @@ const (
 	maskOPRemove maskOP = "remove"
 	maskOPUpsert maskOP = "upsert"
 
-	partInput  = "input"
-	partResult = "result"
+	partInput    = "input"
+	partResult   = "result"
+	partNDBCache = "nd_builtin_cache"
 )
 
 var (
@@ -64,18 +65,20 @@ func newMaskRule(path string, opts ...maskRuleOption) (*maskRule, error) {
 
 	parts := strings.Split(path[1:], "/")
 
-	if parts[0] != partInput && parts[0] != partResult {
+	switch parts[0] {
+	case partInput, partResult, partNDBCache: // OK
+	default:
 		return nil, fmt.Errorf("mask prefix not allowed: %v", parts[0])
 	}
 
 	escapedParts := make([]string, len(parts))
 	for i := range parts {
-		_, err := url.QueryUnescape(parts[i])
+		_, err := url.PathUnescape(parts[i])
 		if err != nil {
 			return nil, err
 		}
 
-		escapedParts[i] = url.QueryEscape(parts[i])
+		escapedParts[i] = url.PathEscape(parts[i])
 	}
 
 	modifyFullObj := false
@@ -130,8 +133,8 @@ func withFailUndefinedPath() maskRuleOption {
 
 func (r maskRule) Mask(event *EventV1) error {
 
-	var maskObj *interface{}     // pointer to event Input|Result object
-	var maskObjPtr **interface{} // pointer to the event Input|Result pointer itself
+	var maskObj *interface{}     // pointer to event Input|Result|NDBCache object
+	var maskObjPtr **interface{} // pointer to the event Input|Result|NDBCache pointer itself
 
 	switch p := r.escapedParts[0]; p {
 	case partInput:
@@ -143,7 +146,6 @@ func (r maskRule) Mask(event *EventV1) error {
 		}
 		maskObj = event.Input
 		maskObjPtr = &event.Input
-
 	case partResult:
 		if event.Result == nil {
 			if r.failUndefinedPath {
@@ -153,6 +155,15 @@ func (r maskRule) Mask(event *EventV1) error {
 		}
 		maskObj = event.Result
 		maskObjPtr = &event.Result
+	case partNDBCache:
+		if event.NDBuiltinCache == nil {
+			if r.failUndefinedPath {
+				return errMaskInvalidObject
+			}
+			return nil
+		}
+		maskObj = event.NDBuiltinCache
+		maskObjPtr = &event.NDBuiltinCache
 	default:
 		return fmt.Errorf("illegal path value: %s", p)
 	}

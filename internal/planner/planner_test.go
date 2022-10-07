@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"github.com/open-policy-agent/opa/ast"
-	"github.com/open-policy-agent/opa/internal/ir"
+	"github.com/open-policy-agent/opa/ir"
 )
 
 func TestPlannerHelloWorld(t *testing.T) {
@@ -139,6 +139,14 @@ func TestPlannerHelloWorld(t *testing.T) {
 				package test
 				p["a"] = 1
 				p["b"] = 2
+			`},
+		},
+		{
+			note:    "every",
+			queries: []string{`data.test.p`},
+			modules: []string{`
+				package test
+				p { xs = [1]; every k, v in xs { k < v } }
 			`},
 		},
 		{
@@ -337,7 +345,8 @@ q = 2`,
 			modules := make([]*ast.Module, len(tc.modules))
 			for i := range modules {
 				file := fmt.Sprintf("module-%d.rego", i)
-				m, err := ast.ParseModule(file, tc.modules[i])
+				opts := ast.ParserOptions{AllFutureKeywords: true}
+				m, err := ast.ParseModuleWithOpts(file, tc.modules[i], opts)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -377,7 +386,9 @@ func (*cmpWalker) Before(interface{}) {}
 func (*cmpWalker) After(interface{})  {}
 
 // Visit takes, for example,
-//     *ir.MakeNullStmt{Location: ir.Location{Index:0, Col:1, Row:1}},
+//
+//	*ir.MakeNullStmt{Location: ir.Location{Index:0, Col:1, Row:1}},
+//
 // and for the first MakeNullStmt it finds, extracts its location,
 // and compares it to the one passed was needle. Other fields of the
 // struct, such as Target for ir.MakeNullStmt, are ignored.
@@ -585,7 +596,7 @@ a = true`},
 				&ir.CallStmt{}:         "<query>:1:1: data[y].a = x",
 				&ir.MakeObjectStmt{}:   "<query>:1:1: data[y].a = x",
 				&ir.ObjectInsertStmt{}: "<query>:1:1: data[y].a = x",
-				&ir.ResultSetAdd{}:     "<query>:1:1: data[y].a = x",
+				&ir.ResultSetAddStmt{}: "<query>:1:1: data[y].a = x",
 				&ir.DotStmt{}:          "<query>:1:1: data[y].a = x",
 			},
 			where: func(p *ir.Policy) interface{} {
@@ -603,7 +614,7 @@ a {
 				&ir.CallStmt{}:         "<query>:1:1: data.test.a = x",
 				&ir.MakeObjectStmt{}:   "<query>:1:1: data.test.a = x",
 				&ir.ObjectInsertStmt{}: "<query>:1:1: data.test.a = x",
-				&ir.ResultSetAdd{}:     "<query>:1:1: data.test.a = x",
+				&ir.ResultSetAddStmt{}: "<query>:1:1: data.test.a = x",
 				&ir.ScanStmt{}:         `module-0.rego:3:3: data.test1[_].y = "z"`,
 			},
 		},
@@ -738,7 +749,7 @@ func TestOptimizeLookup(t *testing.T) {
 		if exp, act := 3, len(path); exp != act {
 			t.Fatalf("expected path len %d, got %d\n", exp, act)
 		}
-		last, ok := path[len(path)-1].(ir.Local)
+		last, ok := path[len(path)-1].Value.(ir.Local)
 		if exp, act := true, ok; exp != act {
 			t.Fatalf("expected last path pieces to be local, got %T\n", last)
 		}

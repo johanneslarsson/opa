@@ -22,7 +22,7 @@ import (
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/internal/presentation"
 	"github.com/open-policy-agent/opa/storage"
-	"github.com/open-policy-agent/opa/storage/inmem"
+	inmem "github.com/open-policy-agent/opa/storage/inmem/test"
 	"github.com/open-policy-agent/opa/util"
 )
 
@@ -2673,6 +2673,28 @@ func TestUnsetPackage(t *testing.T) {
 	}
 	if buffer.String() != "no rules defined\n" {
 		t.Fatalf("Expected unset-package to return to default but got: %v", buffer.String())
+	}
+}
+
+func TestCapabilities(t *testing.T) {
+	capabilities := ast.CapabilitiesForThisVersion()
+	allowedBuiltins := []*ast.Builtin{}
+	for _, builtin := range capabilities.Builtins {
+		if builtin.Name != "http.send" {
+			allowedBuiltins = append(allowedBuiltins, builtin)
+		}
+	}
+	capabilities.Builtins = allowedBuiltins
+	ctx := context.Background()
+	store := inmem.New()
+	var buffer bytes.Buffer
+	repl := newRepl(store, &buffer).WithCapabilities(capabilities)
+	if err := repl.OneShot(ctx, `http.send({"url": "http://example.com", "method": "GET"})`); err != nil {
+		if !strings.Contains(fmt.Sprintf("%v", err), "undefined function http.send") {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+	} else {
+		t.Fatalf("Expected error on http.send")
 	}
 }
 

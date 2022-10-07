@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	"github.com/open-policy-agent/opa/storage"
 	"github.com/open-policy-agent/opa/storage/inmem"
 	"github.com/open-policy-agent/opa/topdown"
+	"github.com/open-policy-agent/opa/topdown/builtins"
 	"github.com/open-policy-agent/opa/topdown/cache"
 	"github.com/open-policy-agent/opa/types"
 	"github.com/open-policy-agent/opa/util"
@@ -655,6 +657,61 @@ func TestPartialRewriteEquals(t *testing.T) {
 	if pq.Queries[0].String() != expectedQuery {
 		t.Errorf("unexpected query in result, expected='%s' found='%s'",
 			expectedQuery, pq.Queries[0].String())
+	}
+}
+
+// NOTE(sr): https://github.com/open-policy-agent/opa/issues/4345
+func TestPrepareAndEvalRaceConditions(t *testing.T) {
+	tests := []struct {
+		note   string
+		module string
+		exp    string
+	}{
+		{
+			note: "object",
+			module: `package test
+			p[{"x":"y"}]`,
+			exp: `[[[{"x":"y"}]]]`,
+		},
+		{
+			note: "set",
+			module: `package test
+			p[{"x"}]`,
+			exp: `[[[["x"]]]]`,
+		},
+		{
+			note: "array",
+			module: `package test
+			p[["x"]]`,
+			exp: `[[[["x"]]]]`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.note, func(t *testing.T) {
+			r := New(
+				Query("data.test.p"),
+				Module("", tc.module),
+				Package("foo"),
+			)
+
+			pq, err := r.PrepareForEval(context.Background())
+			if err != nil {
+				t.Fatalf("Unexpected error: %s", err.Error())
+			}
+
+			// run this 1000 times concurrently
+			var wg sync.WaitGroup
+			wg.Add(1000)
+			for i := 0; i < 1000; i++ {
+				go func(t *testing.T) {
+					t.Helper()
+					assertPreparedEvalQueryEval(t, pq, []EvalOption{}, tc.exp)
+					wg.Done()
+				}(t)
+			}
+			wg.Wait()
+		})
 	}
 }
 
@@ -1380,6 +1437,7 @@ func TestUnsafeBuiltins(t *testing.T) {
 	ctx := context.Background()
 
 	unsafeCountExpr := "unsafe built-in function calls in expression: count"
+	unsafeCountExprWith := `with keyword replacing built-in function: target must not be unsafe: "count"`
 
 	t.Run("unsafe query", func(t *testing.T) {
 		r := New(
@@ -1387,6 +1445,16 @@ func TestUnsafeBuiltins(t *testing.T) {
 			UnsafeBuiltins(map[string]struct{}{"count": {}}),
 		)
 		if _, err := r.Eval(ctx); err == nil || !strings.Contains(err.Error(), unsafeCountExpr) {
+			t.Fatalf("Expected unsafe built-in error but got %v", err)
+		}
+	})
+
+	t.Run("unsafe query, 'with' replacement", func(t *testing.T) {
+		r := New(
+			Query(`is_array([1, 2, 3]) with is_array as count`),
+			UnsafeBuiltins(map[string]struct{}{"count": {}}),
+		)
+		if _, err := r.Eval(ctx); err == nil || !strings.Contains(err.Error(), unsafeCountExprWith) {
 			t.Fatalf("Expected unsafe built-in error but got %v", err)
 		}
 	})
@@ -1406,12 +1474,52 @@ func TestUnsafeBuiltins(t *testing.T) {
 		}
 	})
 
+	t.Run("unsafe module, 'with' replacement in query", func(t *testing.T) {
+		r := New(
+			Query(`data.pkg.deny with is_array as count`),
+			Module("pkg.rego", `package pkg
+			deny {
+				is_array(input.requests) > 10
+			}
+			`),
+			UnsafeBuiltins(map[string]struct{}{"count": {}}),
+		)
+		if _, err := r.Eval(ctx); err == nil || !strings.Contains(err.Error(), unsafeCountExprWith) {
+			t.Fatalf("Expected unsafe built-in error but got %v", err)
+		}
+	})
+
+	t.Run("unsafe module, 'with' replacement in module", func(t *testing.T) {
+		r := New(
+			Query(`data.pkg.deny`),
+			Module("pkg.rego", `package pkg
+			deny {
+				is_array(input.requests) > 10 with is_array as count
+			}
+			`),
+			UnsafeBuiltins(map[string]struct{}{"count": {}}),
+		)
+		if _, err := r.Eval(ctx); err == nil || !strings.Contains(err.Error(), unsafeCountExprWith) {
+			t.Fatalf("Expected unsafe built-in error but got %v", err)
+		}
+	})
+
 	t.Run("inherit in query", func(t *testing.T) {
 		r := New(
 			Compiler(ast.NewCompiler().WithUnsafeBuiltins(map[string]struct{}{"count": {}})),
 			Query("count([])"),
 		)
 		if _, err := r.Eval(ctx); err == nil || !strings.Contains(err.Error(), unsafeCountExpr) {
+			t.Fatalf("Expected unsafe built-in error but got %v", err)
+		}
+	})
+
+	t.Run("inherit in query, 'with' replacement", func(t *testing.T) {
+		r := New(
+			Compiler(ast.NewCompiler().WithUnsafeBuiltins(map[string]struct{}{"count": {}})),
+			Query("is_array([]) with is_array as count"),
+		)
+		if _, err := r.Eval(ctx); err == nil || !strings.Contains(err.Error(), unsafeCountExprWith) {
 			t.Fatalf("Expected unsafe built-in error but got %v", err)
 		}
 	})
@@ -1463,7 +1571,7 @@ func TestPreparedQueryGetModules(t *testing.T) {
 		"c.rego": "package c\nr = 1",
 	}
 
-	var regoArgs []func(r *Rego)
+	regoArgs := make([]func(r *Rego), 0, len(mods)+1)
 
 	for name, mod := range mods {
 		regoArgs = append(regoArgs, Module(name, mod))
@@ -1951,6 +2059,179 @@ func TestEvalWithInterQueryCache(t *testing.T) {
 
 	if len(requests) != 1 {
 		t.Fatal("Expected server to be called only once")
+	}
+}
+
+// We use http.send to ensure the NDBuiltinCache is involved.
+func TestEvalWithNDCache(t *testing.T) {
+	var requests []*http.Request
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r)
+		_, _ = w.Write([]byte(`{"x": 1}`))
+	}))
+	defer ts.Close()
+	query := fmt.Sprintf(`http.send({"method": "get", "url": "%s", "force_json_decode": true})`, ts.URL)
+
+	// Set up the ND cache, and put in some arbitrary constants for the first K/V pair.
+	arbitraryKey := ast.Number(strconv.Itoa(2015))
+	arbitraryValue := ast.String("First commit year")
+	ndBC := builtins.NDBCache{}
+	ndBC.Put("arbitrary_experiment", arbitraryKey, arbitraryValue)
+
+	// Query execution of http.send should add an entry to the NDBuiltinCache.
+	ctx := context.Background()
+	_, err := New(Query(query), NDBuiltinCache(ndBC)).Eval(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check and make sure we got exactly 2x items back in the ND builtin cache.
+	// NDBuiltinCache always has the structure: map[ast.String]map[ast.Array]ast.Value
+	if len(ndBC) != 2 {
+		t.Fatalf("Expected exactly 2 items in non-deterministic builtin cache. Found %d items.\n", len(ndBC))
+	}
+	// Check the cached k/v types for the HTTP section of the cache.
+	if cachedResults, ok := ndBC["http.send"]; ok {
+		err := cachedResults.Iter(func(k, v *ast.Term) error {
+			if _, ok := k.Value.(*ast.Array); !ok {
+				t.Fatalf("http.send failed to store Object key in the ND builtins cache")
+			}
+			if _, ok := v.Value.(ast.Object); !ok {
+				t.Fatalf("http.send failed to store Object value in the ND builtins cache")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Ensure our original arbitrary data in the cache was preserved.
+	if v, ok := ndBC.Get("arbitrary_experiment", arbitraryKey); ok {
+		if v != arbitraryValue {
+			t.Fatalf("Non-deterministic builtins cache value was mangled. Expected: %v, got: %v\n", arbitraryValue, v)
+		}
+	} else {
+		t.Fatal("Non-deterministic builtins cache lookup failed.")
+	}
+}
+
+func TestEvalWithPrebuiltNDCache(t *testing.T) {
+	query := "time.now_ns()"
+	ndBC := builtins.NDBCache{}
+
+	// Populate the cache for time.now_ns with an arbitrary timestamp.
+	timeValue, err := time.Parse("2006-01-02T15:04:05Z", "2015-12-28T14:08:25Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Timestamp ns value will be: 1451311705000000000
+	ndBC.Put("time.now_ns", ast.NewArray(), ast.Number(json.Number(strconv.FormatInt(timeValue.UnixNano(), 10))))
+	// time.now_ns should use the cached entry instead of the current time.
+	ctx := context.Background()
+	rs, err := New(Query(query), NDBuiltinCache(ndBC)).Eval(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check that we got the correct time value in the result set.
+	assertResultSet(t, rs, "[[1451311705000000000]]")
+}
+
+func TestNDBCacheWithRuleBody(t *testing.T) {
+	ctx := context.Background()
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer ts.Close()
+
+	ndBC := builtins.NDBCache{}
+	query := "data.foo.p = x"
+	_, err := New(
+		Query(query),
+		NDBuiltinCache(ndBC),
+		Module("test.rego", fmt.Sprintf(`package foo
+p {
+	http.send({"url": "%s", "method":"get"})
+}`, ts.URL)),
+	).Eval(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ok := ndBC["http.send"]
+	if !ok {
+		t.Fatalf("expected http.send cache entry")
+	}
+}
+
+// Catches issues around iteration with ND builtins.
+func TestNDBCacheWithRuleBodyAndIteration(t *testing.T) {
+	ctx := context.Background()
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	}))
+	defer ts.Close()
+
+	ndBC := builtins.NDBCache{}
+	query := "data.foo.results = x"
+	_, err := New(
+		Query(query),
+		NDBuiltinCache(ndBC),
+		Module("test.rego", fmt.Sprintf(`package foo
+
+import future.keywords
+
+urls := [
+	"%[1]s/headers",
+	"%[1]s/ip",
+	"%[1]s/user-agent"
+]
+
+results[response] {
+	some url in urls
+	response := http.send({
+		"method": "GET",
+		"url": url
+	})
+}`, ts.URL)),
+	).Eval(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ensure that the cache exists, and has exactly 3 entries.
+	entries, ok := ndBC["http.send"]
+	if !ok {
+		t.Fatalf("expected http.send cache entry")
+	}
+	if entries.Len() != 3 {
+		t.Fatalf("expected 3 http.send cache entries, received:\n%v", ndBC)
+	}
+}
+
+// This test ensures that the NDBCache correctly serializes/deserializes.
+func TestNDBCacheMarshalUnmarshalJSON(t *testing.T) {
+	original := builtins.NDBCache{}
+
+	// Populate the cache for time.now_ns with an arbitrary timestamp.
+	original.Put("time.now_ns", ast.NewArray(), ast.Number(json.Number(strconv.FormatInt(1451311705000000000, 10))))
+	jOriginal, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var other builtins.NDBCache
+	err = json.Unmarshal(jOriginal, &other)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jOther, err := json.Marshal(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Check that the two NDBCache value's JSONified forms match exactly.
+	if !bytes.Equal(jOriginal, jOther) {
+		t.Fatalf("JSONified values of NDBCaches do not match; expected %s, got %s", string(jOriginal), string(jOther))
 	}
 }
 

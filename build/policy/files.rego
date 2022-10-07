@@ -9,10 +9,13 @@ package files
 
 import future.keywords.in
 
-import data.helpers.endswith_any
-import data.helpers.last_indexof
+import data.helpers.basename
+import data.helpers.directory
+import data.helpers.extension
 
 filenames := {f.filename | some f in input}
+
+logo_exts := {"png", "svg"}
 
 changes := {filename: attributes |
 	some change in input
@@ -20,32 +23,61 @@ changes := {filename: attributes |
 	attributes := object.remove(change, ["filename"])
 }
 
-get_file_in_pr(filename) = http.send({
+http_error(response) {
+	response.status_code == 0
+}
+
+http_error(response) {
+	response.status_code >= 400
+}
+
+dump_response_on_error(response) := response {
+	http_error(response)
+	print("unexpected error in response", response)
+}
+
+dump_response_on_error(response) := response {
+	not http_error(response)
+}
+
+get_file_in_pr(filename) := dump_response_on_error(http.send({
 	"url": changes[filename].raw_url,
 	"method": "GET",
 	"headers": {"Authorization": sprintf("Bearer %v", [opa.runtime().env.GITHUB_TOKEN])},
 	"cache": true,
 	"enable_redirect": true,
-}).raw_body
+	"raise_error": false,
+})).raw_body
 
 deny["Logo must be placed in docs/website/static/img/logos/integrations"] {
 	"docs/website/data/integrations.yaml" in filenames
 
 	some filename in filenames
-	endswith(filename, ".png")
+	extension(filename) in logo_exts
 	changes[filename].status == "added"
-	directory := substring(filename, 0, last_indexof(filename, "/"))
-	directory != "docs/website/static/img/logos/integrations"
+	directory(filename) != "docs/website/static/img/logos/integrations"
 }
 
-deny["Logo must be a .png file"] {
+deny["Logo must be a .png or .svg file"] {
 	"docs/website/data/integrations.yaml" in filenames
 
 	some filename in filenames
 	changes[filename].status == "added"
-	directory := substring(filename, 0, last_indexof(filename, "/"))
-	directory == "docs/website/static/img/logos/integrations"
-	not endswith(filename, ".png")
+	directory(filename) == "docs/website/static/img/logos/integrations"
+	not extension(filename) in logo_exts
+}
+
+deny["Logo name must match integration"] {
+	"docs/website/data/integrations.yaml" in filenames
+
+	some filename in filenames
+	ext := extension(filename)
+	ext in logo_exts
+	changes[filename].status == "added"
+	logo_name := trim_suffix(basename(filename), concat("", [".", ext]))
+
+	integrations := {integration | some integration, _ in yaml.unmarshal(integrations_file).integrations}
+	not logo_name in integrations
 }
 
 deny[sprintf("Integration '%v' missing required attribute '%v'", [name, attr])] {
@@ -58,13 +90,24 @@ deny[sprintf("Integration '%v' missing required attribute '%v'", [name, attr])] 
 	some attr in (required - {key | some key, _ in item})
 }
 
-deny[sprintf("%s is an invalid YAML file", [filename])] {
+deny[sprintf("Integration '%v' references unknown software '%v' (i.e. not in 'software' object)", [name, software])] {
+	"docs/website/data/integrations.yaml" in filenames
+
+	file := yaml.unmarshal(integrations_file)
+	software_list := {software | file.software[software]}
+
+	some name, item in file.integrations
+	some software in item.software
+	not software in software_list
+}
+
+deny[sprintf("%s is an invalid YAML file: %s", [filename, content])] {
 	some filename, content in yaml_file_contents
 	changes[filename].status in {"added", "modified"}
 	not yaml.is_valid(content)
 }
 
-deny[sprintf("%s is an invalid JSON file", [filename])] {
+deny[sprintf("%s is an invalid JSON file: %s", [filename, content])] {
 	some filename, content in json_file_contents
 	changes[filename].status in {"added", "modified"}
 	not json.is_valid(content)
@@ -72,13 +115,12 @@ deny[sprintf("%s is an invalid JSON file", [filename])] {
 
 integrations_file := get_file_in_pr("docs/website/data/integrations.yaml")
 
-# Helper rules to work around not being able to mock functions yet
 yaml_file_contents := {filename: get_file_in_pr(filename) |
 	some filename in filenames
-	endswith_any(filename, [".yml", ".yaml"])
+	extension(filename) in {"yml", "yaml"}
 }
 
 json_file_contents := {filename: get_file_in_pr(filename) |
 	some filename in filenames
-	endswith(filename, ".json")
+	extension(filename) == "json"
 }

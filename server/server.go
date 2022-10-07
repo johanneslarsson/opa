@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -25,7 +26,6 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/pkg/errors"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
@@ -34,6 +34,7 @@ import (
 
 	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/bundle"
+	"github.com/open-policy-agent/opa/internal/json/patch"
 	"github.com/open-policy-agent/opa/metrics"
 	"github.com/open-policy-agent/opa/plugins"
 	bundlePlugin "github.com/open-policy-agent/opa/plugins/bundle"
@@ -45,6 +46,7 @@ import (
 	"github.com/open-policy-agent/opa/server/writer"
 	"github.com/open-policy-agent/opa/storage"
 	"github.com/open-policy-agent/opa/topdown"
+	"github.com/open-policy-agent/opa/topdown/builtins"
 	iCache "github.com/open-policy-agent/opa/topdown/cache"
 	"github.com/open-policy-agent/opa/topdown/lineage"
 	"github.com/open-policy-agent/opa/tracing"
@@ -135,6 +137,7 @@ type Server struct {
 	interQueryBuiltinCache iCache.InterQueryCache
 	allPluginsOkOnce       bool
 	distributedTracingOpts tracing.Options
+	ndbCacheEnabled        bool
 }
 
 // Metrics defines the interface that the server requires for recording HTTP
@@ -157,8 +160,6 @@ func New() *Server {
 // from s.Listeners().
 func (s *Server) Init(ctx context.Context) (*Server, error) {
 	s.initRouters()
-	s.Handler = s.initHandlerAuth(s.Handler)
-	s.DiagnosticHandler = s.initHandlerAuth(s.DiagnosticHandler)
 
 	txn, err := s.store.NewTransaction(ctx, storage.WriteParams)
 	if err != nil {
@@ -180,6 +181,10 @@ func (s *Server) Init(ctx context.Context) (*Server, error) {
 	s.defaultDecisionPath = s.generateDefaultDecisionPath()
 	s.interQueryBuiltinCache = iCache.NewInterQueryCache(s.manager.InterQueryBuiltinCacheConfig())
 	s.manager.RegisterCacheTrigger(s.updateCacheConfig)
+
+	// authorizer, if configured, needs the iCache to be set up already
+	s.Handler = s.initHandlerAuth(s.Handler)
+	s.DiagnosticHandler = s.initHandlerAuth(s.DiagnosticHandler)
 
 	return s, s.store.Commit(ctx, txn)
 }
@@ -343,6 +348,12 @@ func (s *Server) WithMinTLSVersion(minTLSVersion uint16) *Server {
 // WithDistributedTracingOpts sets the options to be used by distributed tracing.
 func (s *Server) WithDistributedTracingOpts(opts tracing.Options) *Server {
 	s.distributedTracingOpts = opts
+	return s
+}
+
+// WithNDBCacheEnabled sets whether the ND builtins cache is to be used.
+func (s *Server) WithNDBCacheEnabled(ndbCacheEnabled bool) *Server {
+	s.ndbCacheEnabled = ndbCacheEnabled
 	return s
 }
 
@@ -766,6 +777,11 @@ func (s *Server) execQuery(ctx context.Context, r *http.Request, br bundleRevisi
 		rawInput = &x
 	}
 
+	var ndbCache builtins.NDBCache
+	if s.ndbCacheEnabled {
+		ndbCache = builtins.NDBCache{}
+	}
+
 	opts := []func(*rego.Rego){
 		rego.Store(s.store),
 		rego.Transaction(txn),
@@ -781,6 +797,7 @@ func (s *Server) execQuery(ctx context.Context, r *http.Request, br bundleRevisi
 		rego.PrintHook(s.manager.PrintHook()),
 		rego.EnablePrintStatements(s.manager.EnablePrintStatements()),
 		rego.DistributedTracingOpts(s.distributedTracingOpts),
+		rego.NDBuiltinCache(ndbCache),
 	}
 
 	for _, r := range s.manager.GetWasmResolvers() {
@@ -793,7 +810,7 @@ func (s *Server) execQuery(ctx context.Context, r *http.Request, br bundleRevisi
 
 	output, err := rego.Eval(ctx)
 	if err != nil {
-		_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, "", parsedQuery.String(), rawInput, input, nil, err, m)
+		_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, "", parsedQuery.String(), rawInput, input, nil, ndbCache, err, m)
 		return results, err
 	}
 
@@ -810,7 +827,7 @@ func (s *Server) execQuery(ctx context.Context, r *http.Request, br bundleRevisi
 	}
 
 	var x interface{} = results.Result
-	err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, "", parsedQuery.String(), rawInput, input, &x, nil, m)
+	err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, "", parsedQuery.String(), rawInput, input, &x, ndbCache, nil, m)
 	return results, err
 }
 
@@ -867,7 +884,7 @@ func getRevisions(ctx context.Context, store storage.Store, txn storage.Transact
 	return br, nil
 }
 
-func (s *Server) reload(ctx context.Context, txn storage.Transaction, event storage.TriggerEvent) {
+func (s *Server) reload(context.Context, storage.Transaction, storage.TriggerEvent) {
 
 	// NOTE(tsandall): We currently rely on the storage txn to provide
 	// critical sections in the server.
@@ -900,7 +917,7 @@ func (s *Server) v0QueryPath(w http.ResponseWriter, r *http.Request, urlPath str
 
 	input, err := readInputV0(r)
 	if err != nil {
-		writer.ErrorString(w, http.StatusBadRequest, types.CodeInvalidParameter, errors.Wrapf(err, "unexpected parse error for input"))
+		writer.ErrorString(w, http.StatusBadRequest, types.CodeInvalidParameter, fmt.Errorf("unexpected parse error for input: %w", err))
 		return
 	}
 
@@ -908,7 +925,7 @@ func (s *Server) v0QueryPath(w http.ResponseWriter, r *http.Request, urlPath str
 	if input != nil {
 		x, err := ast.JSON(input)
 		if err != nil {
-			writer.ErrorString(w, http.StatusInternalServerError, types.CodeInvalidParameter, errors.Wrapf(err, "could not marshal input"))
+			writer.ErrorString(w, http.StatusInternalServerError, types.CodeInvalidParameter, fmt.Errorf("could not marshal input: %w", err))
 			return
 		}
 		goInput = &x
@@ -935,6 +952,11 @@ func (s *Server) v0QueryPath(w http.ResponseWriter, r *http.Request, urlPath str
 
 	logger := s.getDecisionLogger(br)
 
+	var ndbCache builtins.NDBCache
+	if s.ndbCacheEnabled {
+		ndbCache = builtins.NDBCache{}
+	}
+
 	pqID := "v0QueryPath::" + urlPath
 	preparedQuery, ok := s.getCachedPreparedEvalQuery(pqID, m)
 	if !ok {
@@ -954,14 +976,14 @@ func (s *Server) v0QueryPath(w http.ResponseWriter, r *http.Request, urlPath str
 		partial, strictBuiltinErrors, instrument := false, false, false
 		rego, err := s.makeRego(ctx, partial, strictBuiltinErrors, txn, input, urlPath, m, instrument, nil, opts)
 		if err != nil {
-			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, err, m)
+			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, err, m)
 			writer.ErrorAuto(w, err)
 			return
 		}
 
 		pq, err := rego.PrepareForEval(ctx)
 		if err != nil {
-			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, err, m)
+			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, err, m)
 			writer.ErrorAuto(w, err)
 			return
 		}
@@ -974,6 +996,7 @@ func (s *Server) v0QueryPath(w http.ResponseWriter, r *http.Request, urlPath str
 		rego.EvalParsedInput(input),
 		rego.EvalMetrics(m),
 		rego.EvalInterQueryBuiltinCache(s.interQueryBuiltinCache),
+		rego.EvalNDBuiltinCache(ndbCache),
 	}
 
 	rs, err := preparedQuery.Eval(
@@ -985,14 +1008,14 @@ func (s *Server) v0QueryPath(w http.ResponseWriter, r *http.Request, urlPath str
 
 	// Handle results.
 	if err != nil {
-		_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, err, m)
+		_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, err, m)
 		writer.ErrorAuto(w, err)
 		return
 	}
 
 	if len(rs) == 0 {
 		err := types.NewErrorV1(types.CodeUndefinedDocument, fmt.Sprintf("%v: %v", types.MsgUndefinedError, stringPathToDataRef(urlPath)))
-		if logErr := logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, err, m); logErr != nil {
+		if logErr := logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, err, m); logErr != nil {
 			writer.ErrorAuto(w, logErr)
 			return
 		}
@@ -1000,7 +1023,7 @@ func (s *Server) v0QueryPath(w http.ResponseWriter, r *http.Request, urlPath str
 		writer.Error(w, http.StatusNotFound, err)
 		return
 	}
-	err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, &rs[0].Expressions[0].Value, nil, m)
+	err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, &rs[0].Expressions[0].Value, ndbCache, nil, m)
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -1221,7 +1244,8 @@ func (s *Server) v1CompilePost(w http.ResponseWriter, r *http.Request) {
 
 	m.Timer(metrics.RegoQueryParse).Stop()
 
-	txn, err := s.store.NewTransaction(ctx)
+	c := storage.NewContext().WithMetrics(m)
+	txn, err := s.store.NewTransaction(ctx, storage.TransactionParams{Context: c})
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -1241,6 +1265,7 @@ func (s *Server) v1CompilePost(w http.ResponseWriter, r *http.Request) {
 		rego.ParsedQuery(request.Query),
 		rego.ParsedInput(request.Input),
 		rego.ParsedUnknowns(request.Unknowns),
+		rego.DisableInlining(request.Options.DisableInlining),
 		rego.QueryTracer(buf),
 		rego.Instrument(includeInstrumentation),
 		rego.Metrics(m),
@@ -1320,7 +1345,7 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 	if input != nil {
 		x, err := ast.JSON(input)
 		if err != nil {
-			writer.ErrorString(w, http.StatusInternalServerError, types.CodeInvalidParameter, errors.Wrapf(err, "could not marshal input"))
+			writer.ErrorString(w, http.StatusInternalServerError, types.CodeInvalidParameter, fmt.Errorf("could not marshal input: %w", err))
 			return
 		}
 		goInput = &x
@@ -1329,7 +1354,8 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 	m.Timer(metrics.RegoInputParse).Stop()
 
 	// Prepare for query.
-	txn, err := s.store.NewTransaction(ctx)
+	c := storage.NewContext().WithMetrics(m)
+	txn, err := s.store.NewTransaction(ctx, storage.TransactionParams{Context: c})
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -1343,6 +1369,11 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger := s.getDecisionLogger(br)
+
+	var ndbCache builtins.NDBCache
+	if s.ndbCacheEnabled {
+		ndbCache = builtins.NDBCache{}
+	}
 
 	var buf *topdown.BufferTracer
 
@@ -1371,14 +1402,14 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 		partial := false
 		rego, err := s.makeRego(ctx, partial, strictBuiltinErrors, txn, input, urlPath, m, includeInstrumentation, buf, opts)
 		if err != nil {
-			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, err, m)
+			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, err, m)
 			writer.ErrorAuto(w, err)
 			return
 		}
 
 		pq, err := rego.PrepareForEval(ctx)
 		if err != nil {
-			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, err, m)
+			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, err, m)
 			writer.ErrorAuto(w, err)
 			return
 		}
@@ -1393,6 +1424,7 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 		rego.EvalQueryTracer(buf),
 		rego.EvalInterQueryBuiltinCache(s.interQueryBuiltinCache),
 		rego.EvalInstrument(includeInstrumentation),
+		rego.EvalNDBuiltinCache(ndbCache),
 	}
 
 	rs, err := preparedQuery.Eval(
@@ -1404,7 +1436,7 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 
 	// Handle results.
 	if err != nil {
-		_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, err, m)
+		_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, err, m)
 		writer.ErrorAuto(w, err)
 		return
 	}
@@ -1429,7 +1461,7 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, nil, m)
+		err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, nil, m)
 		if err != nil {
 			writer.ErrorAuto(w, err)
 			return
@@ -1444,7 +1476,7 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 		result.Explanation = s.getExplainResponse(explainMode, *buf, pretty)
 	}
 
-	err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, result.Result, nil, m)
+	err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, result.Result, ndbCache, nil, m)
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -1453,15 +1485,21 @@ func (s *Server) v1DataGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) v1DataPatch(w http.ResponseWriter, r *http.Request) {
+	m := metrics.New()
+	m.Timer(metrics.ServerHandler).Start()
+	defer m.Timer(metrics.ServerHandler).Stop()
+
 	ctx := r.Context()
 	vars := mux.Vars(r)
-
+	includeMetrics := getBoolParam(r.URL, types.ParamMetricsV1, true)
 	ops := []types.PatchV1{}
 
+	m.Timer(metrics.RegoInputParse).Start()
 	if err := util.NewJSONDecoder(r.Body).Decode(&ops); err != nil {
 		writer.ErrorString(w, http.StatusBadRequest, types.CodeInvalidParameter, err)
 		return
 	}
+	m.Timer(metrics.RegoInputParse).Stop()
 
 	patches, err := s.prepareV1PatchSlice(vars["path"], ops)
 	if err != nil {
@@ -1469,7 +1507,9 @@ func (s *Server) v1DataPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txn, err := s.store.NewTransaction(ctx, storage.WriteParams)
+	params := storage.WriteParams
+	params.Context = storage.NewContext().WithMetrics(m)
+	txn, err := s.store.NewTransaction(ctx, params)
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -1495,6 +1535,14 @@ func (s *Server) v1DataPatch(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.store.Commit(ctx, txn); err != nil {
 		writer.ErrorAuto(w, err)
+		return
+	}
+
+	if includeMetrics {
+		result := types.DataResponseV1{
+			Metrics: m.All(),
+		}
+		writer.JSON(w, http.StatusOK, result, false)
 		return
 	}
 
@@ -1531,7 +1579,7 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 	if input != nil {
 		x, err := ast.JSON(input)
 		if err != nil {
-			writer.ErrorString(w, http.StatusInternalServerError, types.CodeInvalidParameter, errors.Wrapf(err, "could not marshal input"))
+			writer.ErrorString(w, http.StatusInternalServerError, types.CodeInvalidParameter, fmt.Errorf("could not marshal input: %w", err))
 			return
 		}
 		goInput = &x
@@ -1539,7 +1587,7 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 
 	m.Timer(metrics.RegoInputParse).Stop()
 
-	txn, err := s.store.NewTransaction(ctx)
+	txn, err := s.store.NewTransaction(ctx, storage.TransactionParams{Context: storage.NewContext().WithMetrics(m)})
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -1554,6 +1602,11 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger := s.getDecisionLogger(br)
+
+	var ndbCache builtins.NDBCache
+	if s.ndbCacheEnabled {
+		ndbCache = builtins.NDBCache{}
+	}
 
 	var buf *topdown.BufferTracer
 
@@ -1586,14 +1639,14 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 
 		rego, err := s.makeRego(ctx, partial, strictBuiltinErrors, txn, input, urlPath, m, includeInstrumentation, buf, opts)
 		if err != nil {
-			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, err, m)
+			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, err, m)
 			writer.ErrorAuto(w, err)
 			return
 		}
 
 		pq, err := rego.PrepareForEval(ctx)
 		if err != nil {
-			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, err, m)
+			_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, err, m)
 			writer.ErrorAuto(w, err)
 			return
 		}
@@ -1608,6 +1661,7 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 		rego.EvalQueryTracer(buf),
 		rego.EvalInterQueryBuiltinCache(s.interQueryBuiltinCache),
 		rego.EvalInstrument(includeInstrumentation),
+		rego.EvalNDBuiltinCache(ndbCache),
 	}
 
 	rs, err := preparedQuery.Eval(
@@ -1619,13 +1673,17 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 
 	// Handle results.
 	if err != nil {
-		_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, err, m)
+		_ = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, err, m)
 		writer.ErrorAuto(w, err)
 		return
 	}
 
 	result := types.DataResponseV1{
 		DecisionID: decisionID,
+	}
+
+	if input == nil {
+		result.Warning = types.NewWarning(types.CodeAPIUsageWarn, types.MsgInputKeyMissing)
 	}
 
 	if includeMetrics || includeInstrumentation {
@@ -1644,7 +1702,7 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, nil, m)
+		err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, nil, ndbCache, nil, m)
 		if err != nil {
 			writer.ErrorAuto(w, err)
 			return
@@ -1659,7 +1717,7 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 		result.Explanation = s.getExplainResponse(explainMode, *buf, pretty)
 	}
 
-	err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, result.Result, nil, m)
+	err = logger.Log(ctx, txn, decisionID, r.RemoteAddr, urlPath, "", goInput, input, result.Result, ndbCache, nil, m)
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -1668,14 +1726,21 @@ func (s *Server) v1DataPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) v1DataPut(w http.ResponseWriter, r *http.Request) {
+	m := metrics.New()
+	m.Timer(metrics.ServerHandler).Start()
+	defer m.Timer(metrics.ServerHandler).Stop()
+
 	ctx := r.Context()
 	vars := mux.Vars(r)
+	includeMetrics := getBoolParam(r.URL, types.ParamMetricsV1, true)
 
+	m.Timer(metrics.RegoInputParse).Start()
 	var value interface{}
 	if err := util.NewJSONDecoder(r.Body).Decode(&value); err != nil {
 		writer.ErrorString(w, http.StatusBadRequest, types.CodeInvalidParameter, err)
 		return
 	}
+	m.Timer(metrics.RegoInputParse).Stop()
 
 	path, ok := storage.ParsePathEscaped("/" + strings.Trim(vars["path"], "/"))
 	if !ok {
@@ -1683,7 +1748,9 @@ func (s *Server) v1DataPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txn, err := s.store.NewTransaction(ctx, storage.WriteParams)
+	params := storage.WriteParams
+	params.Context = storage.NewContext().WithMetrics(m)
+	txn, err := s.store.NewTransaction(ctx, params)
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -1695,15 +1762,16 @@ func (s *Server) v1DataPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err = s.store.Read(ctx, txn, path)
-
 	if err != nil {
 		if !storage.IsNotFound(err) {
 			s.abortAuto(ctx, txn, w, err)
 			return
 		}
-		if err := storage.MakeDir(ctx, s.store, txn, path[:len(path)-1]); err != nil {
-			s.abortAuto(ctx, txn, w, err)
-			return
+		if len(path) > 0 {
+			if err := storage.MakeDir(ctx, s.store, txn, path[:len(path)-1]); err != nil {
+				s.abortAuto(ctx, txn, w, err)
+				return
+			}
 		}
 	} else if r.Header.Get("If-None-Match") == "*" {
 		s.store.Abort(ctx, txn)
@@ -1727,12 +1795,25 @@ func (s *Server) v1DataPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if includeMetrics {
+		result := types.DataResponseV1{
+			Metrics: m.All(),
+		}
+		writer.JSON(w, http.StatusOK, result, false)
+		return
+	}
+
 	writer.Bytes(w, http.StatusNoContent, nil)
 }
 
 func (s *Server) v1DataDelete(w http.ResponseWriter, r *http.Request) {
+	m := metrics.New()
+	m.Timer(metrics.ServerHandler).Start()
+	defer m.Timer(metrics.ServerHandler).Stop()
+
 	ctx := r.Context()
 	vars := mux.Vars(r)
+	includeMetrics := getBoolParam(r.URL, types.ParamMetricsV1, true)
 
 	path, ok := storage.ParsePathEscaped("/" + strings.Trim(vars["path"], "/"))
 	if !ok {
@@ -1740,7 +1821,9 @@ func (s *Server) v1DataDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txn, err := s.store.NewTransaction(ctx, storage.WriteParams)
+	params := storage.WriteParams
+	params.Context = storage.NewContext().WithMetrics(m)
+	txn, err := s.store.NewTransaction(ctx, params)
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -1767,6 +1850,14 @@ func (s *Server) v1DataDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if includeMetrics {
+		result := types.DataResponseV1{
+			Metrics: m.All(),
+		}
+		writer.JSON(w, http.StatusOK, result, false)
+		return
+	}
+
 	writer.Bytes(w, http.StatusNoContent, nil)
 }
 
@@ -1774,7 +1865,7 @@ func (s *Server) v1PoliciesDelete(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	vars := mux.Vars(r)
 	pretty := getBoolParam(r.URL, types.ParamPrettyV1, true)
-	includeMetrics := getBoolParam(r.URL, types.ParamPrettyV1, true)
+	includeMetrics := getBoolParam(r.URL, types.ParamMetricsV1, true)
 
 	id, err := url.PathUnescape(vars["path"])
 	if err != nil {
@@ -1783,8 +1874,9 @@ func (s *Server) v1PoliciesDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m := metrics.New()
-
-	txn, err := s.store.NewTransaction(ctx, storage.WriteParams)
+	params := storage.WriteParams
+	params.Context = storage.NewContext().WithMetrics(m)
+	txn, err := s.store.NewTransaction(ctx, params)
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -1922,7 +2014,7 @@ func (s *Server) v1PoliciesPut(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	vars := mux.Vars(r)
 
-	path, err := url.PathUnescape(vars["path"])
+	id, err := url.PathUnescape(vars["path"])
 	if err != nil {
 		writer.ErrorString(w, http.StatusBadRequest, types.CodeInvalidParameter, err)
 		return
@@ -1942,13 +2034,20 @@ func (s *Server) v1PoliciesPut(w http.ResponseWriter, r *http.Request) {
 
 	m.Timer("server_read_bytes").Stop()
 
-	txn, err := s.store.NewTransaction(ctx, storage.WriteParams)
+	params := storage.WriteParams
+	params.Context = storage.NewContext().WithMetrics(m)
+	txn, err := s.store.NewTransaction(ctx, params)
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
 	}
 
-	if bs, err := s.store.GetPolicy(ctx, txn, path); err != nil {
+	if err := s.checkPolicyIDScope(ctx, txn, id); err != nil && !storage.IsNotFound(err) {
+		s.abortAuto(ctx, txn, w, err)
+		return
+	}
+
+	if bs, err := s.store.GetPolicy(ctx, txn, id); err != nil {
 		if !storage.IsNotFound(err) {
 			s.abortAuto(ctx, txn, w, err)
 			return
@@ -1964,7 +2063,7 @@ func (s *Server) v1PoliciesPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m.Timer(metrics.RegoModuleParse).Start()
-	parsedMod, err := ast.ParseModule(path, string(buf))
+	parsedMod, err := ast.ParseModule(id, string(buf))
 	m.Timer(metrics.RegoModuleParse).Stop()
 
 	if err != nil {
@@ -1995,7 +2094,7 @@ func (s *Server) v1PoliciesPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	modules[path] = parsedMod
+	modules[id] = parsedMod
 
 	c := ast.NewCompiler().
 		SetErrorLimit(s.errLimit).
@@ -2013,7 +2112,7 @@ func (s *Server) v1PoliciesPut(w http.ResponseWriter, r *http.Request) {
 
 	m.Timer(metrics.RegoModuleCompile).Stop()
 
-	if err := s.store.UpsertPolicy(ctx, txn, path, buf); err != nil {
+	if err := s.store.UpsertPolicy(ctx, txn, id, buf); err != nil {
 		s.abortAuto(ctx, txn, w, err)
 		return
 	}
@@ -2065,7 +2164,8 @@ func (s *Server) v1QueryGet(w http.ResponseWriter, r *http.Request) {
 	includeMetrics := getBoolParam(r.URL, types.ParamMetricsV1, true)
 	includeInstrumentation := getBoolParam(r.URL, types.ParamInstrumentV1, true)
 
-	txn, err := s.store.NewTransaction(ctx)
+	params := storage.TransactionParams{Context: storage.NewContext().WithMetrics(m)}
+	txn, err := s.store.NewTransaction(ctx, params)
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -2095,6 +2195,7 @@ func (s *Server) v1QueryGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) v1QueryPost(w http.ResponseWriter, r *http.Request) {
 	m := metrics.New()
+	m.Timer(metrics.ServerHandler).Start()
 
 	decisionID := s.generateDecisionID()
 	ctx := r.Context()
@@ -2134,7 +2235,8 @@ func (s *Server) v1QueryPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	txn, err := s.store.NewTransaction(ctx)
+	params := storage.TransactionParams{Context: storage.NewContext().WithMetrics(m)}
+	txn, err := s.store.NewTransaction(ctx, params)
 	if err != nil {
 		writer.ErrorAuto(w, err)
 		return
@@ -2157,6 +2259,12 @@ func (s *Server) v1QueryPost(w http.ResponseWriter, r *http.Request) {
 			writer.ErrorAuto(w, err)
 		}
 		return
+	}
+
+	m.Timer(metrics.ServerHandler).Stop()
+
+	if includeMetrics || includeInstrumentation {
+		results.Metrics = m.All()
 	}
 
 	writer.JSON(w, http.StatusOK, results, pretty)
@@ -2429,7 +2537,7 @@ func (s *Server) prepareV1PatchSlice(root string, ops []types.PatchV1) (result [
 		}
 
 		var ok bool
-		impl.path, ok = parsePatchPathEscaped(path)
+		impl.path, ok = patch.ParsePatchPathEscaped(path)
 		if !ok {
 			return nil, types.BadPatchPathErr(op.Path)
 		}
@@ -2493,39 +2601,6 @@ func isPathOwned(path, root []string) bool {
 
 func (s *Server) updateCacheConfig(cacheConfig *iCache.Config) {
 	s.interQueryBuiltinCache.UpdateConfig(cacheConfig)
-}
-
-// parsePatchPathEscaped returns a new path for the given escaped str.
-// This is based on storage.ParsePathEscaped so will do URL unescaping of
-// the provided str for backwards compatibility, but also handles the
-// specific escape strings defined in RFC 6901 (JSON Pointer) because
-// that's what's mandated by RFC 6902 (JSON Patch).
-func parsePatchPathEscaped(str string) (path storage.Path, ok bool) {
-	path, ok = storage.ParsePathEscaped(str)
-	if !ok {
-		return
-	}
-	for i := range path {
-		// RFC 6902 section 4: "[The "path" member's] value is a string containing
-		// a JSON-Pointer value [RFC6901] that references a location within the
-		// target document (the "target location") where the operation is performed."
-		//
-		// RFC 6901 section 3: "Because the characters '~' (%x7E) and '/' (%x2F)
-		// have special meanings in JSON Pointer, '~' needs to be encoded as '~0'
-		// and '/' needs to be encoded as '~1' when these characters appear in a
-		// reference token."
-
-		// RFC 6901 section 4: "Evaluation of each reference token begins by
-		// decoding any escaped character sequence.  This is performed by first
-		// transforming any occurrence of the sequence '~1' to '/', and then
-		// transforming any occurrence of the sequence '~0' to '~'.  By performing
-		// the substitutions in this order, an implementation avoids the error of
-		// turning '~01' first into '~1' and then into '/', which would be
-		// incorrect (the string '~01' correctly becomes '~1' after transformation)."
-		path[i] = strings.Replace(path[i], "~1", "/", -1)
-		path[i] = strings.Replace(path[i], "~0", "~", -1)
-	}
-	return
 }
 
 func stringPathToDataRef(s string) (r ast.Ref) {
@@ -2649,7 +2724,7 @@ func readInputV0(r *http.Request) (ast.Value, error) {
 func readInputGetV1(str string) (ast.Value, error) {
 	var input interface{}
 	if err := util.UnmarshalJSON([]byte(str), &input); err != nil {
-		return nil, errors.Wrapf(err, "parameter contains malformed input document")
+		return nil, fmt.Errorf("parameter contains malformed input document: %w", err)
 	}
 	return ast.InterfaceToValue(input)
 }
@@ -2682,10 +2757,10 @@ func readInputPostV1(r *http.Request) (ast.Value, error) {
 		// anything related
 		if strings.Contains(ct, "yaml") {
 			if err := util.Unmarshal(bs, &request); err != nil {
-				return nil, errors.Wrapf(err, "body contains malformed input document")
+				return nil, fmt.Errorf("body contains malformed input document: %w", err)
 			}
 		} else if err := util.UnmarshalJSON(bs, &request); err != nil {
-			return nil, errors.Wrapf(err, "body contains malformed input document")
+			return nil, fmt.Errorf("body contains malformed input document: %w", err)
 		}
 
 		if request.Input == nil {
@@ -2702,6 +2777,11 @@ type compileRequest struct {
 	Query    ast.Body
 	Input    ast.Value
 	Unknowns []*ast.Term
+	Options  compileRequestOptions
+}
+
+type compileRequestOptions struct {
+	DisableInlining []string
 }
 
 func readInputCompilePostV1(r io.ReadCloser) (*compileRequest, *types.ErrorV1) {
@@ -2748,6 +2828,9 @@ func readInputCompilePostV1(r io.ReadCloser) (*compileRequest, *types.ErrorV1) {
 		Query:    query,
 		Input:    input,
 		Unknowns: unknowns,
+		Options: compileRequestOptions{
+			DisableInlining: request.Options.DisableInlining,
+		},
 	}
 
 	return result, nil
@@ -2816,7 +2899,7 @@ type decisionLogger struct {
 	logger    func(context.Context, *Info) error
 }
 
-func (l decisionLogger) Log(ctx context.Context, txn storage.Transaction, decisionID, remoteAddr, path string, query string, goInput *interface{}, astInput ast.Value, goResults *interface{}, err error, m metrics.Metrics) error {
+func (l decisionLogger) Log(ctx context.Context, txn storage.Transaction, decisionID, remoteAddr, path string, query string, goInput *interface{}, astInput ast.Value, goResults *interface{}, ndbCache builtins.NDBCache, err error, m metrics.Metrics) error {
 
 	bundles := map[string]BundleInfo{}
 	for name, rev := range l.revisions {
@@ -2839,9 +2922,17 @@ func (l decisionLogger) Log(ctx context.Context, txn storage.Transaction, decisi
 		Metrics:    m,
 	}
 
+	if ndbCache != nil {
+		x, err := ast.JSON(ndbCache.AsValue())
+		if err != nil {
+			return err
+		}
+		info.NDBuiltinCache = &x
+	}
+
 	if l.logger != nil {
 		if err := l.logger(ctx, info); err != nil {
-			return errors.Wrap(err, "decision_logs")
+			return fmt.Errorf("decision_logs: %w", err)
 		}
 	}
 

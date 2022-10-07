@@ -21,6 +21,7 @@ import (
 	"github.com/open-policy-agent/opa/internal/wasm/util"
 	"github.com/open-policy-agent/opa/metrics"
 	"github.com/open-policy-agent/opa/topdown"
+	"github.com/open-policy-agent/opa/topdown/builtins"
 	"github.com/open-policy-agent/opa/topdown/cache"
 	"github.com/open-policy-agent/opa/topdown/print"
 )
@@ -31,7 +32,6 @@ type VM struct {
 	engine               *wasmtime.Engine
 	store                *wasmtime.Store
 	instance             *wasmtime.Instance // Pointer to avoid unintented destruction (triggering finalizers within).
-	intHandle            *wasmtime.InterruptHandle
 	policy               []byte
 	abiMajorVersion      int32
 	abiMinorVersion      int32
@@ -74,6 +74,7 @@ func newVM(opts vmOpts, engine *wasmtime.Engine) (*VM, error) {
 	ctx := context.Background()
 	v := &VM{engine: engine}
 	store := wasmtime.NewStore(engine)
+	store.SetEpochDeadline(1)
 	memorytype := wasmtime.NewMemoryType(opts.memoryMin, true, opts.memoryMax)
 	memory, err := wasmtime.NewMemory(store, memorytype)
 	if err != nil {
@@ -100,10 +101,6 @@ func newVM(opts vmOpts, engine *wasmtime.Engine) (*VM, error) {
 	i, err := linker.Instantiate(store, module)
 	if err != nil {
 		return nil, err
-	}
-	v.intHandle, err = store.InterruptHandle()
-	if err != nil {
-		return nil, fmt.Errorf("get interrupt handle: %w", err)
 	}
 
 	v.abiMajorVersion, v.abiMinorVersion, err = getABIVersion(i, store)
@@ -275,10 +272,11 @@ func (i *VM) Eval(ctx context.Context,
 	seed io.Reader,
 	ns time.Time,
 	iqbCache cache.InterQueryCache,
+	ndbCache builtins.NDBCache,
 	ph print.Hook,
 	capabilities *ast.Capabilities) ([]byte, error) {
 	if i.abiMinorVersion < int32(2) {
-		return i.evalCompat(ctx, entrypoint, input, metrics, seed, ns, iqbCache, ph, capabilities)
+		return i.evalCompat(ctx, entrypoint, input, metrics, seed, ns, iqbCache, ndbCache, ph, capabilities)
 	}
 
 	metrics.Timer("wasm_vm_eval").Start()
@@ -329,7 +327,7 @@ func (i *VM) Eval(ctx context.Context,
 	// make use of it (e.g. `http.send`); and it will spawn a go routine
 	// cancelling the builtins that use topdown.Cancel, when the context is
 	// cancelled.
-	i.dispatcher.Reset(ctx, seed, ns, iqbCache, ph, capabilities)
+	i.dispatcher.Reset(ctx, seed, ns, iqbCache, ndbCache, ph, capabilities)
 
 	metrics.Timer("wasm_vm_eval_call").Start()
 	resultAddr, err := i.evalOneOff(ctx, int32(entrypoint), i.dataAddr, inputAddr, inputLen, heapPtr)
@@ -358,6 +356,7 @@ func (i *VM) evalCompat(ctx context.Context,
 	seed io.Reader,
 	ns time.Time,
 	iqbCache cache.InterQueryCache,
+	ndbCache builtins.NDBCache,
 	ph print.Hook,
 	capabilities *ast.Capabilities) ([]byte, error) {
 	metrics.Timer("wasm_vm_eval").Start()
@@ -369,7 +368,7 @@ func (i *VM) evalCompat(ctx context.Context,
 	// make use of it (e.g. `http.send`); and it will spawn a go routine
 	// cancelling the builtins that use topdown.Cancel, when the context is
 	// cancelled.
-	i.dispatcher.Reset(ctx, seed, ns, iqbCache, ph, capabilities)
+	i.dispatcher.Reset(ctx, seed, ns, iqbCache, ndbCache, ph, capabilities)
 
 	err := i.setHeapState(ctx, i.evalHeapPtr)
 	if err != nil {
@@ -714,7 +713,7 @@ func callOrCancel(ctx context.Context, vm *VM, name string, args ...int32) (inte
 	go func() {
 		select {
 		case <-ctx.Done():
-			vm.intHandle.Interrupt()
+			vm.store.Engine.IncrementEpoch()
 		case <-done:
 		}
 		close(ctxdone)
@@ -747,9 +746,8 @@ func callOrCancel(ctx context.Context, vm *VM, name string, args ...int32) (inte
 		// if last err was trap, extract information
 		var t *wasmtime.Trap
 		if errors.As(err, &t) {
-			code := t.Code()
-			if code != nil && *code == wasmtime.Interrupt {
-				return 0, sdk_errors.New(sdk_errors.CancelledErr, getStack(t.Frames(), "interrupted"))
+			if strings.Contains(t.Message(), "wasm trap: interrupt") {
+				return 0, sdk_errors.New(sdk_errors.CancelledErr, "interrupted")
 			}
 			return 0, sdk_errors.New(sdk_errors.InternalErr, getStack(t.Frames(), "trapped"))
 		}

@@ -14,18 +14,22 @@ WASM_ENABLED ?= 1
 GO := CGO_ENABLED=$(CGO_ENABLED) GOFLAGS="-buildmode=exe" go
 GO_TEST_TIMEOUT := -timeout 30m
 
+GOVERSION ?= $(shell cat ./.go-version)
+GOARCH := $(shell go env GOARCH)
+GOOS := $(shell go env GOOS)
+
+ifeq ($(GOOS)/$(GOARCH),darwin/arm64)
+WASM_ENABLED=0
+endif
+
 GO_TAGS := -tags=
 ifeq ($(WASM_ENABLED),1)
 GO_TAGS = -tags=opa_wasm
 endif
 
-GOVERSION ?= $(shell cat ./.go-version)
-GOARCH := $(shell go env GOARCH)
-GOOS := $(shell go env GOOS)
+GOLANGCI_LINT_VERSION := v1.46.2
 
-GOLANGCI_LINT_VERSION := v1.43.0
-
-DOCKER_RUNNING := $(shell docker ps >/dev/null 2>&1 && echo 1 || echo 0)
+DOCKER_RUNNING ?= $(shell docker ps >/dev/null 2>&1 && echo 1 || echo 0)
 
 # We use root because the windows build, invoked through the ci-go-build-windows
 # target, installs the gcc mingw32 cross-compiler.
@@ -53,11 +57,9 @@ BIN := opa_$(GOOS)_$(GOARCH)
 # Optional external configuration useful for forks of OPA
 DOCKER_IMAGE ?= openpolicyagent/opa
 S3_RELEASE_BUCKET ?= opa-releases
-FUZZ_TIME ?= 3600  # 1hr
+FUZZ_TIME ?= 1h
 TELEMETRY_URL ?= #Default empty
 
-BUILD_COMMIT := $(shell ./build/get-build-commit.sh)
-BUILD_TIMESTAMP := $(shell ./build/get-build-timestamp.sh)
 BUILD_HOSTNAME := $(shell ./build/get-build-hostname.sh)
 
 RELEASE_BUILD_IMAGE := golang:$(GOVERSION)
@@ -69,9 +71,6 @@ TELEMETRY_FLAG := -X github.com/open-policy-agent/opa/internal/report.ExternalSe
 endif
 
 LDFLAGS := "$(TELEMETRY_FLAG) \
-	-X github.com/open-policy-agent/opa/version.Version=$(VERSION) \
-	-X github.com/open-policy-agent/opa/version.Vcs=$(BUILD_COMMIT) \
-	-X github.com/open-policy-agent/opa/version.Timestamp=$(BUILD_TIMESTAMP) \
 	-X github.com/open-policy-agent/opa/version.Hostname=$(BUILD_HOSTNAME)"
 
 
@@ -162,7 +161,7 @@ clean: wasm-lib-clean
 
 .PHONY: fuzz
 fuzz:
-	$(MAKE) -C ./build/fuzzer all
+	go test ./ast -fuzz FuzzParseStatementsAndCompileModules -fuzztime ${FUZZ_TIME} -v -run '^$$'
 
 ######################################################
 #
@@ -345,7 +344,7 @@ ifneq ($(GOARCH),arm64) # build only static images for arm64
 		.
 	$(DOCKER) build \
 		-t $(DOCKER_IMAGE):$(VERSION)-rootless \
-		--build-arg USER=1000 \
+		--build-arg USER=1000:1000 \
 		--build-arg BASE=gcr.io/distroless/cc \
 		--build-arg BIN_DIR=$(RELEASE_DIR) \
 		--platform linux/$* \
@@ -378,7 +377,7 @@ push-manifest-list-%: ensure-executable-bin
 		.
 	$(DOCKER) buildx build \
 		--tag $(DOCKER_IMAGE):$*-rootless \
-		--build-arg USER=1000 \
+		--build-arg USER=1000:1000 \
 		--build-arg BASE=gcr.io/distroless/cc \
 		--build-arg BIN_DIR=$(RELEASE_DIR) \
 		--platform $(DOCKER_PLATFORMS) \
@@ -403,6 +402,8 @@ ifneq ($(GOARCH),arm64) # we build only static images for arm64
 	$(DOCKER) run --platform linux/$* $(DOCKER_IMAGE):$(VERSION) version
 	$(DOCKER) run --platform linux/$* $(DOCKER_IMAGE):$(VERSION)-debug version
 	$(DOCKER) run --platform linux/$* $(DOCKER_IMAGE):$(VERSION)-rootless version
+
+	$(DOCKER) image inspect $(DOCKER_IMAGE):$(VERSION)-rootless | opa eval --fail --format raw --stdin-input 'input[0].Config.User = "1000:1000"'
 endif
 	$(DOCKER) run --platform linux/$* $(DOCKER_IMAGE):$(VERSION)-static version
 
@@ -410,11 +411,12 @@ endif
 .PHONY: ci-binary-smoke-test-%
 ci-binary-smoke-test-%:
 	chmod +x "$(RELEASE_DIR)/$(BINARY)"
+	"$(RELEASE_DIR)/$(BINARY)" version
 	"$(RELEASE_DIR)/$(BINARY)" eval -t "$*" 'time.now_ns()'
 
 .PHONY: push-binary-edge
 push-binary-edge:
-	aws s3 sync $(RELEASE_DIR) s3://$(S3_RELEASE_BUCKET)/edge/ --delete --no-progress
+	aws s3 sync $(RELEASE_DIR) s3://$(S3_RELEASE_BUCKET)/edge/ --no-progress --region us-west-1
 
 .PHONY: docker-login
 docker-login:
@@ -441,14 +443,14 @@ release-ci: push-image push-manifest-list-latest
 endif
 
 .PHONY: netlify-prod
-netlify-prod: clean docs-clean build docs-generate docs-production-build
+netlify-prod: clean docs-clean build docs-production-build
 
 .PHONY: netlify-preview
-netlify-preview: clean docs-clean build docs-live-blocks-install-deps docs-live-blocks-test docs-generate docs-preview-build
+netlify-preview: clean docs-clean build docs-live-blocks-install-deps docs-live-blocks-test docs-dev-generate docs-preview-build
 
+# Kept for compatibility. Use `make fuzz` instead.
 .PHONY: check-fuzz
-check-fuzz:
-	./build/check-fuzz.sh $(FUZZ_TIME)
+check-fuzz: fuzz
 
 # GOPRIVATE=* causes go to fetch all dependencies from their corresponding VCS
 # source, not through the golang-provided proxy services. We're cleaning out
@@ -480,14 +482,14 @@ endif
 		-e GITHUB_TOKEN=$(GITHUB_TOKEN) \
 		-e LAST_VERSION=$(LAST_VERSION) \
 		-v $(PWD):/_src \
-		python:2.7 \
+		cmd.cat/make/git/go/python3/perl \
 		/_src/build/gen-release-patch.sh --version=$(VERSION) --source-url=/_src
 
 .PHONY: dev-patch
 dev-patch:
 	@$(DOCKER) run $(DOCKER_FLAGS) \
 		-v $(PWD):/_src \
-		python:2.7 \
+		cmd.cat/make/git/go/python3/perl \
 		/_src/build/gen-dev-patch.sh --version=$(VERSION) --source-url=/_src
 
 # Deprecated targets. To be removed.

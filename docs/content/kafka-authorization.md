@@ -59,15 +59,15 @@ opa build --bundle policies/ --output bundles/bundle.tar.gz
 
 #### Kafka Authorizer JAR File
 
-Next, download the latest version of the [Open Policy Agent plugin for Kafka authorization](https://github.com/anderseknert/opa-kafka-plugin)
-plugin from the projects [release pages](https://github.com/anderseknert/opa-kafka-plugin/releases).
+Next, download the latest version of the [Open Policy Agent plugin for Kafka authorization](https://github.com/StyraInc/opa-kafka-plugin)
+plugin from the projects [release pages](https://github.com/StyraInc/opa-kafka-plugin/releases).
 
 Store the plugin in the `plugin` directory (replace `${version}` with the version number of the plugin just downloaded):
 ```bash
 mv opa-authorizer-${version}-all.jar plugin/
 ```
 
-For more information on how to configure the OPA plugin for Kafka, see the plugin [repository](https://github.com/anderseknert/opa-kafka-plugin).
+For more information on how to configure the OPA plugin for Kafka, see the plugin [repository](https://github.com/StyraInc/opa-kafka-plugin).
 
 Next, create a `docker-compose.yaml` file that runs OPA, Nginx, ZooKeeper, and Kafka.
 
@@ -188,7 +188,7 @@ This field can be used inside the policy.
 
 A detailed rundown of generating SSL certificates and JKS files required
 for SSL client authentication is outside the scope of this tutorial, but the plugin
-repository provides an [example script](https://github.com/anderseknert/opa-kafka-plugin/tree/main/example/opa_tutorial/create_cert.sh)
+repository provides an [example script](https://github.com/StyraInc/opa-kafka-plugin/tree/main/example/opa_tutorial/create_cert.sh)
 that demonstrates the creation of client certificates for the four different
 users used in this tutorial:
 
@@ -200,7 +200,7 @@ users used in this tutorial:
 Lets' download the script and run it:
 
 ```shell
-curl -O https://raw.githubusercontent.com/anderseknert/opa-kafka-plugin/main/example/opa_tutorial/create_cert.sh
+curl -O https://raw.githubusercontent.com/StyraInc/opa-kafka-plugin/main/example/opa_tutorial/create_cert.sh
 chmod +x create_cert.sh
 ./create_cert.sh
 ```
@@ -246,7 +246,7 @@ package kafka.authz
 
 import future.keywords.in
 
-default allow = false
+default allow := false
 
 allow {
 	not deny
@@ -264,9 +264,9 @@ deny {
 # data could be pulled from external sources like AD, Git, etc.
 #-----------------------------------------------------------------------------
 
-consumer_allowlist = {"pii": {"pii_consumer"}}
+consumer_allowlist := {"pii": {"pii_consumer"}}
 
-topic_metadata = {"credit-scores": {"tags": ["pii"]}}
+topic_metadata := {"credit-scores": {"tags": ["pii"]}}
 
 #-----------------------------------
 # Helpers for checking topic access.
@@ -298,18 +298,19 @@ is_topic_resource {
 	input.action.resourcePattern.resourceType == "TOPIC"
 }
 
-topic_name = input.action.resourcePattern.name {
+topic_name := input.action.resourcePattern.name {
 	is_topic_resource
 }
 
-principal = {"fqn": parsed.CN, "name": cn_parts[0]} {
+principal := {"fqn": parsed.CN, "name": cn_parts[0]} {
 	parsed := parse_user(input.requestContext.principal.name)
 	cn_parts := split(parsed.CN, ".")
-} 
-# If client certificates aren't used for authentication
-else = {"fqn": "", "name": input.requestContext.principal.name}
+}
 
-parse_user(user) = {key: value |
+# If client certificates aren't used for authentication
+else := {"fqn": "", "name": input.requestContext.principal.name}
+
+parse_user(user) := {key: value |
 	parts := split(user, ",")
 	[key, value] := split(parts[_], "=")
 }
@@ -445,7 +446,7 @@ deny {
     not producer_is_allowlisted_for_large_fanout
 }
 
-producer_allowlist = {
+producer_allowlist := {
     "large-fanout": {
         "fanout_producer",
     }
@@ -464,7 +465,7 @@ Next, update the `topic_metadata` data structure in the same file to indicate
 that the `click-stream` topic has a high fanout.
 
 ```live:updated_metadata:module:read_only
-topic_metadata = {
+topic_metadata := {
     "click-stream": {
         "tags": ["large-fanout"],
     },
@@ -527,5 +528,5 @@ policy.
 
 If you want to use the Kafka Authorizer plugin that integrates Kafka with
 OPA, see the build and install instructions in the
-[opa-kafka-plugin](https://github.com/anderseknert/opa-kafka-plugin)
+[opa-kafka-plugin](https://github.com/StyraInc/opa-kafka-plugin)
 repository.

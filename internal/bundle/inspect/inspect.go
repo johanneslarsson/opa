@@ -24,35 +24,49 @@ type Info struct {
 	Signatures  bundle.SignaturesConfig  `json:"signatures_config,omitempty"`
 	WasmModules []map[string]interface{} `json:"wasm_modules,omitempty"`
 	Namespaces  map[string][]string      `json:"namespaces,omitempty"`
+	Annotations []*ast.AnnotationsRef    `json:"annotations,omitempty"`
 }
 
-func File(path string) (*Info, error) {
-	b, err := loader.NewFileLoader().WithSkipBundleVerification(true).AsBundle(path)
+func File(path string, includeAnnotations bool) (*Info, error) {
+	b, err := loader.NewFileLoader().
+		WithSkipBundleVerification(true).
+		WithProcessAnnotation(true). // Always process annotations, for enriching namespace listing
+		AsBundle(path)
 	if err != nil {
 		return nil, err
 	}
 
 	bi := &Info{Manifest: b.Manifest}
 
-	namespaces := map[string][]string{}
+	namespaces := make(map[string][]string, len(b.Modules))
+	modules := make([]*ast.Module, 0, len(b.Modules))
 	for _, m := range b.Modules {
 		namespaces[m.Parsed.Package.Path.String()] = append(namespaces[m.Parsed.Package.Path.String()], filepath.Clean(m.Path))
+		modules = append(modules, m.Parsed)
 	}
 	bi.Namespaces = namespaces
+
+	if includeAnnotations {
+		as, errs := ast.BuildAnnotationSet(modules)
+		if len(errs) > 0 {
+			return nil, errs
+		}
+		bi.Annotations = as.Flatten()
+	}
 
 	err = bi.getBundleDataWasmAndSignatures(path)
 	if err != nil {
 		return nil, err
 	}
 
-	wasmModules := []map[string]interface{}{}
+	wasmModules := make([]map[string]interface{}, 0, len(b.WasmModules))
 	for _, w := range b.WasmModules {
 		wasmModule := map[string]interface{}{
 			"url":  w.URL,
 			"path": w.Path,
 		}
 
-		entrypoints := []string{}
+		var entrypoints []string
 		for _, r := range w.Entrypoints {
 			entrypoints = append(entrypoints, r.String())
 		}

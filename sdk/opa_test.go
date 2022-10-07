@@ -14,7 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/open-policy-agent/opa/ast"
 	"github.com/open-policy-agent/opa/logging"
+	"github.com/open-policy-agent/opa/rego"
+	"github.com/open-policy-agent/opa/topdown/builtins"
 
 	"github.com/fortytw2/leaktest"
 	loggingtest "github.com/open-policy-agent/opa/logging/test"
@@ -84,6 +87,71 @@ func TestPlugins(t *testing.T) {
 	defer opa.Stop(ctx)
 }
 
+func TestPluginPanic(t *testing.T) {
+	ctx := context.Background()
+
+	opa, err := sdk.New(ctx, sdk.Options{})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opa.Stop(ctx)
+}
+
+func TestSDKConfigurableID(t *testing.T) {
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": "package system\nmain = time.now_ns()",
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"decision_logs": {
+			"console": true
+		}
+	}`, server.URL())
+
+	testLogger := loggingtest.New()
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config:        strings.NewReader(config),
+		ConsoleLogger: testLogger,
+		ID:            "164031de-e511-11ec-8fea-0242ac120002"})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	if _, err := opa.Decision(ctx, sdk.DecisionOptions{
+		Now: time.Unix(0, 1619868194450288000).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := testLogger.Entries()
+
+	if entries[0].Fields["labels"].(map[string]interface{})["id"] != "164031de-e511-11ec-8fea-0242ac120002" {
+		t.Fatalf("expected %v but got %v", "164031de-e511-11ec-8fea-0242ac120002", entries[0].Fields["labels"].(map[string]interface{})["id"])
+	}
+
+}
+
 func TestDecision(t *testing.T) {
 
 	ctx := context.Background()
@@ -145,6 +213,84 @@ func TestDecision(t *testing.T) {
 	} else if !reflect.DeepEqual(result.Result, exp) {
 		t.Fatalf("expected %v but got %v", exp, result.Result)
 	}
+}
+
+func TestPartial(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": `
+				package test
+				allow {
+					data.junk.x = input.y
+				}
+			`,
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"decision_logs": {
+			"console": true
+		}
+	}`, server.URL())
+
+	testLogger := loggingtest.New()
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config:        strings.NewReader(config),
+		ConsoleLogger: testLogger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	var result *sdk.PartialResult
+	if result, err = opa.Partial(ctx, sdk.PartialOptions{
+		Input:    map[string]int{"y": 2},
+		Query:    "data.test.allow = true",
+		Unknowns: []string{"data.junk.x"},
+		Mapper:   &sdk.RawMapper{},
+		Now:      time.Unix(0, 1619868194450288000).UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	} else if decision, ok := result.Result.(*rego.PartialQueries); !ok || decision.Queries[0].String() != "2 = data.junk.x" {
+		t.Fatal("expected &{[2 = data.junk.x] []} true but got:", decision, ok)
+	}
+
+	entries := testLogger.Entries()
+
+	if l := len(entries); l != 1 {
+		t.Fatalf("expected %v but got %v", 1, l)
+	}
+
+	// just checking for existence, since it's a complex value
+	if entries[0].Fields["mapped_result"] == nil {
+		t.Fatalf("expected not nil value for mapped_result but got nil")
+	}
+
+	if entries[0].Fields["result"] == nil {
+		t.Fatalf("expected not nil value for result but got nil")
+	}
+
+	if entries[0].Fields["timestamp"] != "2021-05-01T11:23:14.450288Z" {
+		t.Fatalf("expected %v but got %v", "2021-05-01T11:23:14.450288Z", entries[0].Fields["timestamp"])
+	}
+
 }
 
 func TestUndefinedError(t *testing.T) {
@@ -250,6 +396,76 @@ func TestDecisionLogging(t *testing.T) {
 		Now: time.Unix(0, 1619868194450288000).UTC(),
 	}); err != nil {
 		t.Fatal(err)
+	}
+
+}
+
+func TestDecisionLoggingWithNDBCache(t *testing.T) {
+
+	ctx := context.Background()
+
+	server := sdktest.MustNewServer(
+		sdktest.MockBundle("/bundles/bundle.tar.gz", map[string]string{
+			"main.rego": "package system\nmain = time.now_ns()",
+		}),
+	)
+
+	defer server.Stop()
+
+	config := fmt.Sprintf(`{
+		"services": {
+			"test": {
+				"url": %q
+			}
+		},
+		"bundles": {
+			"test": {
+				"resource": "/bundles/bundle.tar.gz"
+			}
+		},
+		"decision_logs": {
+			"console": true,
+			"nd_builtin_cache": true
+		}
+	}`, server.URL())
+
+	testLogger := loggingtest.New()
+	opa, err := sdk.New(ctx, sdk.Options{
+		Config:        strings.NewReader(config),
+		ConsoleLogger: testLogger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer opa.Stop(ctx)
+
+	// Build ND builtins cache, and populate with an unused builtin.
+	ndbc := builtins.NDBCache{}
+	ndbc.Put("rand.intn", ast.NewArray(), ast.NewObject([2]*ast.Term{ast.StringTerm("z"), ast.IntNumberTerm(7)}))
+
+	// Verify that timestamp matches time.now_ns() value.
+	if _, err := opa.Decision(ctx, sdk.DecisionOptions{
+		Now:      time.Unix(0, 1619868194450288000).UTC(),
+		NDBCache: ndbc,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries := testLogger.Entries()
+
+	// Check the contents of the ND builtins cache.
+	if cache, ok := entries[0].Fields["nd_builtin_cache"]; ok {
+		// Ensure the original cache entry for rand.intn is still there.
+		if _, ok := cache.(map[string]interface{})["rand.intn"]; !ok {
+			t.Fatalf("ND builtins cache was not preserved during evaluation.")
+		}
+		// Ensure time.now_ns entry was picked up correctly.
+		if _, ok := cache.(map[string]interface{})["time.now_ns"]; !ok {
+			t.Fatalf("ND builtins cache did not observe time.now_ns call during evaluation.")
+		}
+	} else {
+		t.Fatalf("ND builtins cache missing.")
 	}
 
 }
@@ -479,11 +695,11 @@ func TestStopWithDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	before := time.Now()
-	opa.Stop(ctx) // 1m timeout is ignored
+	opa.Stop(ctx) // 1s timeout is ignored
 
 	dur := time.Since(before)
 	diff := dur - timeout
-	maxDelta := 6 * time.Millisecond
+	maxDelta := 500 * time.Millisecond
 	if diff > maxDelta || diff < -maxDelta {
 		t.Errorf("expected shutdown to have %v grace period, measured shutdown in %v (max delta %v)", timeout, dur, maxDelta)
 	}

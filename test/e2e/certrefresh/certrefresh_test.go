@@ -94,6 +94,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestCertificateRotation(t *testing.T) {
+	wait := 20 * time.Millisecond // file reload happens every millisecond
 
 	// before rotation
 	cert := getCert(t)
@@ -103,7 +104,7 @@ func TestCertificateRotation(t *testing.T) {
 
 	// replace file on disk
 	replaceCerts(t, certFile1, certKeyFile1)
-	time.Sleep(10 * time.Millisecond) // file reload happens every millisecond
+	time.Sleep(wait)
 
 	// after rotation
 	cert = getCert(t)
@@ -113,7 +114,7 @@ func TestCertificateRotation(t *testing.T) {
 
 	// replace file with nothing
 	replaceCerts(t, os.DevNull, os.DevNull)
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(wait)
 
 	// second cert still used
 	cert = getCert(t)
@@ -123,7 +124,7 @@ func TestCertificateRotation(t *testing.T) {
 
 	// go back to first cert
 	replaceCerts(t, certFile0, certKeyFile0)
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(wait)
 	cert = getCert(t)
 	if exp, act := serial0, string(cert.SerialNumber.String()); exp != act {
 		t.Fatalf("expected signature %s, got %s", exp, act)
@@ -154,7 +155,12 @@ func copy(from, to string) error {
 	defer dst.Close()
 
 	_, err = io.Copy(dst, src)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Ensure that our writes get committed to disk, even on slower systems.
+	return dst.Sync()
 }
 
 func getCert(t *testing.T) *x509.Certificate {

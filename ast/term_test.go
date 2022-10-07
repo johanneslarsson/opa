@@ -7,9 +7,12 @@ package ast
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/open-policy-agent/opa/util"
@@ -263,68 +266,6 @@ func TestObjectFilter(t *testing.T) {
 	}
 }
 
-func TestObjectInsertKeepsSorting(t *testing.T) {
-	keysSorted := func(o *object) func(int, int) bool {
-		return func(i, j int) bool {
-			return Compare(o.keys[i].key, o.keys[j].key) < 0
-		}
-	}
-
-	obj := NewObject(
-		[2]*Term{StringTerm("d"), IntNumberTerm(4)},
-		[2]*Term{StringTerm("b"), IntNumberTerm(2)},
-		[2]*Term{StringTerm("a"), IntNumberTerm(1)},
-	)
-	o := obj.(*object)
-	act := sort.SliceIsSorted(o.keys, keysSorted(o))
-	if exp := true; act != exp {
-		t.Errorf("SliceIsSorted: expected %v, got %v", exp, act)
-		for i := range o.keys {
-			t.Logf("elem[%d]: %v", i, o.keys[i].key)
-		}
-	}
-
-	obj.Insert(StringTerm("c"), IntNumberTerm(3))
-	act = sort.SliceIsSorted(o.keys, keysSorted(o))
-	if exp := true; act != exp {
-		t.Errorf("SliceIsSorted: expected %v, got %v", exp, act)
-		for i := range o.keys {
-			t.Logf("elem[%d]: %v", i, o.keys[i].key)
-		}
-	}
-}
-
-func TestSetInsertKeepsKeysSorting(t *testing.T) {
-	keysSorted := func(s *set) func(int, int) bool {
-		return func(i, j int) bool {
-			return Compare(s.keys[i], s.keys[j]) < 0
-		}
-	}
-
-	s0 := NewSet(
-		StringTerm("d"),
-		StringTerm("b"),
-		StringTerm("a"),
-	)
-	s := s0.(*set)
-	act := sort.SliceIsSorted(s.keys, keysSorted(s))
-	if exp := true; act != exp {
-		t.Errorf("SliceIsSorted: expected %v, got %v", exp, act)
-		for i := range s.keys {
-			t.Logf("elem[%d]: %v", i, s.keys[i])
-		}
-	}
-
-	s0.Add(StringTerm("c"))
-	act = sort.SliceIsSorted(s.keys, keysSorted(s))
-	if exp := true; act != exp {
-		t.Errorf("SliceIsSorted: expected %v, got %v", exp, act)
-		for i := range s.keys {
-			t.Logf("elem[%d]: %v", i, s.keys[i])
-		}
-	}
-}
-
 func TestTermBadJSON(t *testing.T) {
 
 	input := `{
@@ -418,7 +359,7 @@ func TestFind(t *testing.T) {
 	}
 }
 
-func TestHash(t *testing.T) {
+func TestHashObject(t *testing.T) {
 
 	doc := `{"a": [[true, {"b": [null]}, {"c": "d"}]], "e": {100: a[i].b}, "k": ["foo" | true], "o": {"foo": "bar" | true}, "sc": {"foo" | true}, "s": {1, 2, {3, 4}}, "big": 1e+1000}`
 
@@ -430,6 +371,77 @@ func TestHash(t *testing.T) {
 
 	if obj1.Hash() != obj2.Hash() {
 		t.Errorf("Expected hash codes to be equal")
+	}
+
+	// Calculate hash like we did before moving the caching to create/update:
+	obj := obj1.(*object)
+	exp := 0
+	for h, curr := range obj.elems {
+		for ; curr != nil; curr = curr.next {
+			exp += h
+			exp += curr.value.Hash()
+		}
+	}
+
+	if act := obj1.Hash(); exp != act {
+		t.Errorf("expected %v, got %v", exp, act)
+	}
+}
+
+func TestHashArray(t *testing.T) {
+
+	doc := `[{"a": [[true, {"b": [null]}, {"c": "d"}]]}, 100, true, [a[i].b], {100: a[i].b}, ["foo" | true], {"foo": "bar" | true}, {"foo" | true}, {1, 2, {3, 4}}, 1e+1000]`
+
+	stmt1 := MustParseStatement(doc)
+	stmt2 := MustParseStatement(doc)
+
+	arr1 := stmt1.(Body)[0].Terms.(*Term).Value.(*Array)
+	arr2 := stmt2.(Body)[0].Terms.(*Term).Value.(*Array)
+
+	if arr1.Hash() != arr2.Hash() {
+		t.Errorf("Expected hash codes to be equal")
+	}
+
+	// Calculate hash like we did before moving the caching to create/update:
+	exp := termSliceHash(arr1.elems)
+
+	if act := arr1.Hash(); exp != act {
+		t.Errorf("expected %v, got %v", exp, act)
+	}
+
+	for j := 0; j < arr1.Len(); j++ {
+		for i := 0; i <= j; i++ {
+			slice := arr1.Slice(i, j)
+			exp := termSliceHash(slice.elems)
+			if act := slice.Hash(); exp != act {
+				t.Errorf("arr1[%d:%d]: expected %v, got %v", i, j, exp, act)
+			}
+		}
+	}
+}
+
+func TestHashSet(t *testing.T) {
+
+	doc := `{{"a": [[true, {"b": [null]}, {"c": "d"}]]}, 100, 100, 100, true, [a[i].b], {100: a[i].b}, ["foo" | true], {"foo": "bar" | true}, {"foo" | true}, {1, 2, {3, 4}}, 1e+1000}`
+
+	stmt1 := MustParseStatement(doc)
+	stmt2 := MustParseStatement(doc)
+
+	set1 := stmt1.(Body)[0].Terms.(*Term).Value.(Set)
+	set2 := stmt2.(Body)[0].Terms.(*Term).Value.(Set)
+
+	if set1.Hash() != set2.Hash() {
+		t.Errorf("Expected hash codes to be equal")
+	}
+
+	// Calculate hash like we did before moving the caching to create/update:
+	exp := 0
+	set1.Foreach(func(x *Term) {
+		exp += x.Hash()
+	})
+
+	if act := set1.Hash(); exp != act {
+		t.Errorf("expected %v, got %v", exp, act)
 	}
 }
 
@@ -859,6 +871,94 @@ func TestSetCopy(t *testing.T) {
 	if !expCpy.Equal(cpy) {
 		t.Errorf("Expected %v but got %v", expCpy, cpy)
 	}
+}
+
+// Constructs a set, and then has several reader goroutines attempt to
+// concurrently iterate across it. This should pretty consistently
+// hit a race condition around sorting the underlying key slice if
+// the sorting isn't guarded properly.
+func TestSetConcurrentReads(t *testing.T) {
+	// Create array of numbers.
+	numbers := make([]*Term, 10000)
+	for i := 0; i < 10000; i++ {
+		numbers[i] = IntNumberTerm(i)
+	}
+	// Shuffle numbers array for random insertion order.
+	rand.Seed(10000)
+	rand.Shuffle(len(numbers), func(i, j int) {
+		numbers[i], numbers[j] = numbers[j], numbers[i]
+	})
+	// Build set with numbers in unsorted order.
+	s := NewSet()
+	for i := 0; i < len(numbers); i++ {
+		s.Add(numbers[i])
+	}
+	// In-place sort on numbers.
+	sort.Sort(termSlice(numbers))
+
+	// Check if race condition on key sorting is present.
+	var wg sync.WaitGroup
+	num := runtime.NumCPU()
+	wg.Add(num)
+	for i := 0; i < num; i++ {
+		go func() {
+			defer wg.Done()
+			var retrieved []*Term
+			s.Foreach(func(v *Term) {
+				retrieved = append(retrieved, v)
+			})
+			// Check for sortedness of retrieved results.
+			// This will hit a race condition around `s.sortedKeys`.
+			for n := 0; n < len(retrieved); n++ {
+				if retrieved[n] != numbers[n] {
+					t.Errorf("Expected: %v at iteration %d but got %v instead", numbers[n], n, retrieved[n])
+				}
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestObjectConcurrentReads(t *testing.T) {
+	// Create array of numbers.
+	numbers := make([]*Term, 10000)
+	for i := 0; i < 10000; i++ {
+		numbers[i] = IntNumberTerm(i)
+	}
+	// Shuffle numbers array for random insertion order.
+	rand.Seed(10000)
+	rand.Shuffle(len(numbers), func(i, j int) {
+		numbers[i], numbers[j] = numbers[j], numbers[i]
+	})
+	// Build an object with numbers in unsorted order.
+	o := NewObject()
+	for i := 0; i < len(numbers); i++ {
+		o.Insert(numbers[i], NullTerm())
+	}
+	// In-place sort on numbers.
+	sort.Sort(termSlice(numbers))
+
+	// Check if race condition on key sorting is present.
+	var wg sync.WaitGroup
+	num := runtime.NumCPU()
+	wg.Add(num)
+	for i := 0; i < num; i++ {
+		go func() {
+			defer wg.Done()
+			var retrieved []*Term
+			o.Foreach(func(k, v *Term) {
+				retrieved = append(retrieved, k)
+			})
+			// Check for sortedness of retrieved results.
+			// This will hit a race condition around `s.sortedKeys`.
+			for n := 0; n < len(retrieved); n++ {
+				if retrieved[n] != numbers[n] {
+					t.Errorf("Expected: %v at iteration %d but got %v instead", numbers[n], n, retrieved[n])
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestArrayOperations(t *testing.T) {

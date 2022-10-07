@@ -27,6 +27,7 @@ type buildParams struct {
 	capabilities       *capabilitiesFlag
 	target             *util.EnumFlag
 	bundleMode         bool
+	pruneUnused        bool
 	optimizationLevel  int
 	entrypoints        repeatedStringFlag
 	outputFile         string
@@ -46,7 +47,7 @@ type buildParams struct {
 func newBuildParams() buildParams {
 	return buildParams{
 		capabilities: newcapabilitiesFlag(),
-		target:       util.NewEnumFlag(compile.TargetRego, []string{compile.TargetRego, compile.TargetWasm}),
+		target:       util.NewEnumFlag(compile.TargetRego, compile.Targets),
 	}
 }
 
@@ -113,6 +114,11 @@ The 'build' command supports targets (specified by -t):
     wasm    The wasm target emits a bundle containing a WebAssembly module compiled from
             the input files for each specified entrypoint. The bundle may contain the
             original policy or data files.
+
+    plan    The plan target emits a bundle containing a plan, i.e., an intermediate
+			representation compiled from the input files for each specified entrypoint.
+			This is for further processing, OPA cannot evaluate a "plan bundle" like it
+			can evaluate a wasm or rego bundle.
 
 The -e flag tells the 'build' command which documents will be queried by the software
 asking for policy decisions, so that it can focus optimization efforts and ensure
@@ -201,7 +207,7 @@ The OPA repository contains a set of capabilities files for each OPA release. Fo
 the following command builds a directory of policies ('./policies') and validates them
 against OPA v0.22.0:
 
-    opa build ./policies --capabilities $OPA_SRC/capabilities/v0.22.0.json
+    opa build ./policies --capabilities v0.22.0
 `,
 		PreRunE: func(Cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -218,7 +224,8 @@ against OPA v0.22.0:
 	}
 
 	buildCommand.Flags().VarP(buildParams.target, "target", "t", "set the output bundle target type")
-	buildCommand.Flags().BoolVarP(&buildParams.debug, "debug", "", false, "enable debug output")
+	buildCommand.Flags().BoolVar(&buildParams.pruneUnused, "prune-unused", false, "exclude dependents of entrypoints")
+	buildCommand.Flags().BoolVar(&buildParams.debug, "debug", false, "enable debug output")
 	buildCommand.Flags().IntVarP(&buildParams.optimizationLevel, "optimize", "O", 0, "set optimization level")
 	buildCommand.Flags().VarP(&buildParams.entrypoints, "entrypoint", "e", "set slash separated entrypoint path")
 	buildCommand.Flags().VarP(&buildParams.revision, "revision", "r", "set output bundle revision")
@@ -273,6 +280,7 @@ func dobuild(params buildParams, args []string) error {
 		WithCapabilities(capabilities).
 		WithTarget(params.target.String()).
 		WithAsBundle(params.bundleMode).
+		WithPruneUnused(params.pruneUnused).
 		WithOptimizationLevel(params.optimizationLevel).
 		WithOutput(buf).
 		WithEntrypoints(params.entrypoints.v...).

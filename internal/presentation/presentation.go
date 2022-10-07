@@ -75,7 +75,7 @@ func (o DepAnalysisOutput) Pretty(w io.Writer) error {
 		}
 	} else if len(o.Virtual) > 0 {
 		headers = []string{"Virtual Documents"}
-		rows = make([][]string, len(o.Base))
+		rows = make([][]string, len(o.Virtual))
 		for i := range rows {
 			rows[i] = []string{o.Virtual[i].String()}
 		}
@@ -223,7 +223,8 @@ func (e OutputErrors) Error() string {
 		prefix = fmt.Sprintf("%d errors occurred:\n", len(e))
 	}
 
-	var s []string
+	// We preallocate for at least the minimum number of strings.
+	s := make([]string, 0, len(e))
 	for _, err := range e {
 		s = append(s, err.Error())
 		if l, ok := err.Details.(string); ok {
@@ -346,7 +347,7 @@ func Source(w io.Writer, r Output) error {
 
 	for i := range r.Partial.Queries {
 		fmt.Fprintf(w, "# Query %d\n", i+1)
-		bs, err := format.Ast(r.Partial.Queries[i])
+		bs, err := format.AstWithOpts(r.Partial.Queries[i], format.Opts{IgnoreLocations: true})
 		if err != nil {
 			return err
 		}
@@ -355,7 +356,7 @@ func Source(w io.Writer, r Output) error {
 
 	for i := range r.Partial.Support {
 		fmt.Fprintf(w, "# Module %d\n", i+1)
-		bs, err := format.Ast(r.Partial.Support[i])
+		bs, err := format.AstWithOpts(r.Partial.Support[i], format.Opts{IgnoreLocations: true})
 		if err != nil {
 			return err
 		}
@@ -455,10 +456,11 @@ func prettyPartial(w io.Writer, pq *rego.PartialQueries) error {
 	return nil
 }
 
+// prettyASTNode is used for pretty-printing the result of partial eval
 func prettyASTNode(x interface{}) (string, int, error) {
-	bs, err := format.Ast(x)
+	bs, err := format.AstWithOpts(x, format.Opts{IgnoreLocations: true})
 	if err != nil {
-		return "", 0, fmt.Errorf("format error: %v", err)
+		return "", 0, fmt.Errorf("format error: %w", err)
 	}
 	var maxLineWidth int
 	s := strings.Trim(strings.Replace(string(bs), "\t", "  ", -1), "\n")
@@ -596,10 +598,10 @@ func generateTableMetrics(writer io.Writer) *tablewriter.Table {
 
 func generateTableWithKeys(writer io.Writer, keys ...string) *tablewriter.Table {
 	table := tablewriter.NewWriter(writer)
-	aligns := []int{}
-	var hdrs []string
+	aligns := make([]int, 0, len(keys))
+	hdrs := make([]string, 0, len(keys))
 	for _, k := range keys {
-		hdrs = append(hdrs, strings.Title((k)))
+		hdrs = append(hdrs, strings.Title(k)) //nolint:staticcheck // SA1019, no unicode here
 		aligns = append(aligns, tablewriter.ALIGN_LEFT)
 	}
 	table.SetHeader(hdrs)

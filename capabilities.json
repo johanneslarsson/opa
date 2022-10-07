@@ -894,10 +894,18 @@
             "type": "string"
           },
           {
-            "dynamic": {
-              "type": "string"
-            },
-            "type": "array"
+            "of": [
+              {
+                "type": "null"
+              },
+              {
+                "dynamic": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "type": "any"
           },
           {
             "type": "string"
@@ -1039,6 +1047,248 @@
       }
     },
     {
+      "name": "graphql.is_valid",
+      "decl": {
+        "args": [
+          {
+            "of": [
+              {
+                "type": "string"
+              },
+              {
+                "dynamic": {
+                  "key": {
+                    "type": "any"
+                  },
+                  "value": {
+                    "type": "any"
+                  }
+                },
+                "type": "object"
+              }
+            ],
+            "type": "any"
+          },
+          {
+            "of": [
+              {
+                "type": "string"
+              },
+              {
+                "dynamic": {
+                  "key": {
+                    "type": "any"
+                  },
+                  "value": {
+                    "type": "any"
+                  }
+                },
+                "type": "object"
+              }
+            ],
+            "type": "any"
+          }
+        ],
+        "result": {
+          "type": "boolean"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "graphql.parse",
+      "decl": {
+        "args": [
+          {
+            "of": [
+              {
+                "type": "string"
+              },
+              {
+                "dynamic": {
+                  "key": {
+                    "type": "any"
+                  },
+                  "value": {
+                    "type": "any"
+                  }
+                },
+                "type": "object"
+              }
+            ],
+            "type": "any"
+          },
+          {
+            "of": [
+              {
+                "type": "string"
+              },
+              {
+                "dynamic": {
+                  "key": {
+                    "type": "any"
+                  },
+                  "value": {
+                    "type": "any"
+                  }
+                },
+                "type": "object"
+              }
+            ],
+            "type": "any"
+          }
+        ],
+        "result": {
+          "static": [
+            {
+              "dynamic": {
+                "key": {
+                  "type": "any"
+                },
+                "value": {
+                  "type": "any"
+                }
+              },
+              "type": "object"
+            },
+            {
+              "dynamic": {
+                "key": {
+                  "type": "any"
+                },
+                "value": {
+                  "type": "any"
+                }
+              },
+              "type": "object"
+            }
+          ],
+          "type": "array"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "graphql.parse_and_verify",
+      "decl": {
+        "args": [
+          {
+            "of": [
+              {
+                "type": "string"
+              },
+              {
+                "dynamic": {
+                  "key": {
+                    "type": "any"
+                  },
+                  "value": {
+                    "type": "any"
+                  }
+                },
+                "type": "object"
+              }
+            ],
+            "type": "any"
+          },
+          {
+            "of": [
+              {
+                "type": "string"
+              },
+              {
+                "dynamic": {
+                  "key": {
+                    "type": "any"
+                  },
+                  "value": {
+                    "type": "any"
+                  }
+                },
+                "type": "object"
+              }
+            ],
+            "type": "any"
+          }
+        ],
+        "result": {
+          "static": [
+            {
+              "type": "boolean"
+            },
+            {
+              "dynamic": {
+                "key": {
+                  "type": "any"
+                },
+                "value": {
+                  "type": "any"
+                }
+              },
+              "type": "object"
+            },
+            {
+              "dynamic": {
+                "key": {
+                  "type": "any"
+                },
+                "value": {
+                  "type": "any"
+                }
+              },
+              "type": "object"
+            }
+          ],
+          "type": "array"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "graphql.parse_query",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "dynamic": {
+            "key": {
+              "type": "any"
+            },
+            "value": {
+              "type": "any"
+            }
+          },
+          "type": "object"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "graphql.parse_schema",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "dynamic": {
+            "key": {
+              "type": "any"
+            },
+            "value": {
+              "type": "any"
+            }
+          },
+          "type": "object"
+        },
+        "type": "function"
+      }
+    },
+    {
       "name": "gt",
       "decl": {
         "args": [
@@ -1130,7 +1380,8 @@
           "type": "object"
         },
         "type": "function"
-      }
+      },
+      "nondeterministic": true
     },
     {
       "name": "indexof",
@@ -1339,7 +1590,8 @@
           "type": "array"
         },
         "type": "function"
-      }
+      },
+      "nondeterministic": true
     },
     {
       "name": "io.jwt.encode_sign",
@@ -1383,7 +1635,8 @@
           "type": "string"
         },
         "type": "function"
-      }
+      },
+      "nondeterministic": true
     },
     {
       "name": "io.jwt.encode_sign_raw",
@@ -1403,7 +1656,8 @@
           "type": "string"
         },
         "type": "function"
-      }
+      },
+      "nondeterministic": true
     },
     {
       "name": "io.jwt.verify_es256",
@@ -2375,7 +2629,8 @@
           "type": "set"
         },
         "type": "function"
-      }
+      },
+      "nondeterministic": true
     },
     {
       "name": "numbers.range",
@@ -2526,6 +2781,73 @@
       }
     },
     {
+      "name": "object.subset",
+      "decl": {
+        "args": [
+          {
+            "of": [
+              {
+                "dynamic": {
+                  "type": "any"
+                },
+                "type": "array"
+              },
+              {
+                "dynamic": {
+                  "key": {
+                    "type": "any"
+                  },
+                  "value": {
+                    "type": "any"
+                  }
+                },
+                "type": "object"
+              },
+              {
+                "of": {
+                  "type": "any"
+                },
+                "type": "set"
+              }
+            ],
+            "type": "any"
+          },
+          {
+            "of": [
+              {
+                "dynamic": {
+                  "type": "any"
+                },
+                "type": "array"
+              },
+              {
+                "dynamic": {
+                  "key": {
+                    "type": "any"
+                  },
+                  "value": {
+                    "type": "any"
+                  }
+                },
+                "type": "object"
+              },
+              {
+                "of": {
+                  "type": "any"
+                },
+                "type": "set"
+              }
+            ],
+            "type": "any"
+          }
+        ],
+        "result": {
+          "type": "any"
+        },
+        "type": "function"
+      }
+    },
+    {
       "name": "object.union",
       "decl": {
         "args": [
@@ -2598,7 +2920,8 @@
           "type": "object"
         },
         "type": "function"
-      }
+      },
+      "nondeterministic": true
     },
     {
       "name": "or",
@@ -2697,7 +3020,8 @@
           "type": "number"
         },
         "type": "function"
-      }
+      },
+      "nondeterministic": true
     },
     {
       "name": "re_match",
@@ -2814,6 +3138,26 @@
       }
     },
     {
+      "name": "regex.replace",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "type": "string"
+        },
+        "type": "function"
+      }
+    },
+    {
       "name": "regex.split",
       "decl": {
         "args": [
@@ -2852,6 +3196,27 @@
         ],
         "result": {
           "type": "boolean"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "rego.metadata.chain",
+      "decl": {
+        "result": {
+          "dynamic": {
+            "type": "any"
+          },
+          "type": "array"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "rego.metadata.rule",
+      "decl": {
+        "result": {
+          "type": "any"
         },
         "type": "function"
       }
@@ -3070,6 +3435,108 @@
           },
           {
             "type": "string"
+          }
+        ],
+        "result": {
+          "type": "boolean"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "strings.any_prefix_match",
+      "decl": {
+        "args": [
+          {
+            "of": [
+              {
+                "type": "string"
+              },
+              {
+                "dynamic": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "of": {
+                  "type": "string"
+                },
+                "type": "set"
+              }
+            ],
+            "type": "any"
+          },
+          {
+            "of": [
+              {
+                "type": "string"
+              },
+              {
+                "dynamic": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "of": {
+                  "type": "string"
+                },
+                "type": "set"
+              }
+            ],
+            "type": "any"
+          }
+        ],
+        "result": {
+          "type": "boolean"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "strings.any_suffix_match",
+      "decl": {
+        "args": [
+          {
+            "of": [
+              {
+                "type": "string"
+              },
+              {
+                "dynamic": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "of": {
+                  "type": "string"
+                },
+                "type": "set"
+              }
+            ],
+            "type": "any"
+          },
+          {
+            "of": [
+              {
+                "type": "string"
+              },
+              {
+                "dynamic": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "of": {
+                  "type": "string"
+                },
+                "type": "set"
+              }
+            ],
+            "type": "any"
           }
         ],
         "result": {
@@ -3346,7 +3813,8 @@
           "type": "number"
         },
         "type": "function"
-      }
+      },
+      "nondeterministic": true
     },
     {
       "name": "time.parse_duration_ns",
@@ -3569,11 +4037,6 @@
       "decl": {
         "args": [
           {
-            "of": [
-              {
-                "type": "any"
-              }
-            ],
             "type": "any"
           }
         ],
@@ -3602,6 +4065,20 @@
             "type": "any"
           },
           "type": "set"
+        },
+        "type": "function"
+      }
+    },
+    {
+      "name": "units.parse",
+      "decl": {
+        "args": [
+          {
+            "type": "string"
+          }
+        ],
+        "result": {
+          "type": "number"
         },
         "type": "function"
       }
@@ -3738,7 +4215,8 @@
           "type": "string"
         },
         "type": "function"
-      }
+      },
+      "nondeterministic": true
     },
     {
       "name": "walk",
@@ -3810,6 +4288,9 @@
     }
   ],
   "future_keywords": [
+    "contains",
+    "every",
+    "if",
     "in"
   ],
   "wasm_abi_versions": [

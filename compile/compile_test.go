@@ -30,7 +30,7 @@ import (
 func TestOrderedStringSet(t *testing.T) {
 	var ss orderedStringSet
 	result := ss.Append("a", "b", "b", "a", "e", "c", "e")
-	if !reflect.DeepEqual(result, orderedStringSet{"a", "b", "e", "c"}) {
+	if !reflect.DeepEqual(result, orderedStringSet{}.Append("a", "b", "e", "c")) {
 		t.Fatal(result)
 	}
 }
@@ -2650,12 +2650,12 @@ q[3]
 					}
 
 					// Ensure we have the right number of entrypoints.
-					if len(compiler.entrypoints) != len(tc.wantEntrypoints) {
+					if len(compiler.entrypoints.values) != len(tc.wantEntrypoints) {
 						t.Fatalf("Wrong number of entrypoints. Expected %v, got %v.", tc.wantEntrypoints, compiler.entrypoints)
 					}
 
 					// Ensure those entrypoints match the ones we expect.
-					for _, entrypoint := range compiler.entrypoints {
+					for _, entrypoint := range compiler.entrypoints.values {
 						if _, found := tc.wantEntrypoints[entrypoint]; !found {
 							t.Fatalf("Unexpected entrypoint '%s'", entrypoint)
 						}

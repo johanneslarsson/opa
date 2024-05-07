@@ -249,19 +249,19 @@ func (c *Compiler) WithRegoVersion(v ast.RegoVersion) *Compiler {
 }
 
 func addEntrypointsFromAnnotations(c *Compiler, ar []*ast.AnnotationsRef) error {
-	for _, ref := range ar {
+	for _, refVal := range ar {
 		var entrypoint ast.Ref
-		scope := ref.Annotations.Scope
+		scope := refVal.Annotations.Scope
 
-		if ref.Annotations.Entrypoint {
+		if refVal.Annotations.Entrypoint {
 			// Build up the entrypoint path from either package path or rule.
 			switch scope {
 			case "package":
-				if p := ref.GetPackage(); p != nil {
+				if p := refVal.GetPackage(); p != nil {
 					entrypoint = p.Path
 				}
 			case "rule":
-				if r := ref.GetRule(); r != nil {
+				if r := refVal.GetRule(); r != nil {
 					entrypoint = r.Ref().GroundPrefix()
 				}
 			default:
@@ -409,7 +409,8 @@ func (c *Compiler) init() error {
 		return fmt.Errorf("invalid target %q", c.target)
 	}
 
-	for _, e := range c.entrypoints {
+	c.entrypointrefs = make([]*ast.Term, 0, len(c.entrypoints.values))
+	for _, e := range c.entrypoints.values {
 		r, err := ref.ParseDataPath(e)
 		if err != nil {
 			return fmt.Errorf("entrypoint %v not valid: use <package>/<rule>", e)
@@ -477,14 +478,14 @@ func (c *Compiler) initBundle(usePath bool) error {
 	}
 
 	if c.asBundle {
-		var names []string
+		names := make([]string, 0, len(load.Bundles))
 
 		for k := range load.Bundles {
 			names = append(names, k)
 		}
 
 		sort.Strings(names)
-		var bundles []*bundle.Bundle
+		bundles := make([]*bundle.Bundle, 0, len(names))
 
 		for _, k := range names {
 			bundles = append(bundles, load.Bundles[k])
@@ -517,6 +518,8 @@ func (c *Compiler) initBundle(usePath bool) error {
 	}
 
 	sort.Strings(modules)
+
+	result.Modules = make([]bundle.ModuleFile, 0, len(modules))
 
 	for _, module := range modules {
 		path := filepath.ToSlash(load.Files.Modules[module].Name)
@@ -586,7 +589,7 @@ func (c *Compiler) compilePlan(context.Context) error {
 
 		extras := ast.NewSet()
 		for rule := range deps {
-			extras.Add(ast.NewTerm(rule.Path()))
+			extras.Add(ast.NewTerm(rule.Ref()))
 		}
 
 		sorted := extras.Sorted()
@@ -598,7 +601,7 @@ func (c *Compiler) compilePlan(context.Context) error {
 			}
 
 			if !c.entrypoints.Contains(p) {
-				c.entrypoints = append(c.entrypoints, p)
+				c.entrypoints.Append(p)
 				c.entrypointrefs = append(c.entrypointrefs, sorted.Elem(i))
 			}
 		}
@@ -618,11 +621,11 @@ func (c *Compiler) compilePlan(context.Context) error {
 		}
 
 		if len(c.compiler.GetRules(c.entrypointrefs[i].Value.(ast.Ref))) == 0 {
-			unmappedEntrypoints = append(unmappedEntrypoints, c.entrypoints[i])
+			unmappedEntrypoints = append(unmappedEntrypoints, c.entrypoints.values[i])
 		}
 
 		queries[i] = planner.QuerySet{
-			Name:          c.entrypoints[i],
+			Name:          c.entrypoints.values[i],
 			Queries:       []ast.Body{compiled},
 			RewrittenVars: qc.RewrittenVars(),
 		}
@@ -715,7 +718,7 @@ func (c *Compiler) compileWasm(ctx context.Context) error {
 
 	// Each entrypoint needs an entry in the manifest
 	for i, e := range c.entrypointrefs {
-		entrypointPath := c.entrypoints[i]
+		entrypointPath := c.entrypoints.values[i]
 
 		var annotations []*ast.Annotations
 		if !c.isPackage(e) {
@@ -749,7 +752,7 @@ func findAnnotationsForTerm(term *ast.Term, annotationRefs []*ast.AnnotationsRef
 		return nil
 	}
 
-	var result []*ast.Annotations
+	result := make([]*ast.Annotations, 0, len(annotationRefs))
 
 	for _, ar := range annotationRefs {
 		if r.Equal(ar.Path) {
@@ -775,7 +778,7 @@ func pruneBundleEntrypoints(b *bundle.Bundle, entrypointrefs []*ast.Term) error 
 			// Drop any rules that match the entrypoint path.
 			var rules []*ast.Rule
 			for _, rule := range mf.Parsed.Rules {
-				rulePath := rule.Path()
+				rulePath := rule.Ref()
 				if !rulePath.Equal(entrypoint.Value) {
 					rules = append(rules, rule)
 				} else {
@@ -1245,30 +1248,24 @@ func transitiveDependents(compiler *ast.Compiler, rule *ast.Rule, deps map[*ast.
 	}
 }
 
-type orderedStringSet []string
+type orderedStringSet struct {
+	keys   map[string]struct{}
+	values []string
+}
 
 func (ss orderedStringSet) Append(s ...string) orderedStringSet {
 	for _, x := range s {
-		var found bool
-		for _, other := range ss {
-			if x == other {
-				found = true
-			}
-		}
-		if !found {
-			ss = append(ss, x)
+		if _, ok := ss.keys[x]; !ok {
+			ss.keys[x] = struct{}{}
+			ss.values = append(ss.values, x)
 		}
 	}
 	return ss
 }
 
 func (ss orderedStringSet) Contains(s string) bool {
-	for _, other := range ss {
-		if s == other {
-			return true
-		}
-	}
-	return false
+	_, ok := ss.keys[s]
+	return ok
 }
 
 func stringsToRefs(x []string) []ast.Ref {
